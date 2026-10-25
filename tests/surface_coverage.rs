@@ -11,13 +11,12 @@ use letterxpress::transport::{
     Method, MockTransport, RecordedRequest, RecordingTransport, Request, Response, Transport,
 };
 use letterxpress::{
-    Backgrounds, Balance, BankForm, Color, Credentials, Date, Deletion, EmailDelivery, EmailJob,
-    EmailJobPage, EmailJobQuery, EmailJobSubmission, EmailJobUpdate, EmailOption, Error,
-    InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, JobStatus, Journal, JournalFilter,
-    JournalType, Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest, PrintItem,
-    PrintJob, PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered, Separator,
-    Shipping, Specification, Terms, TransactionFilter, TransactionPage, TransactionQuery,
-    TransportKind,
+    Backgrounds, Balance, BankForm, Color, Date, Deletion, EmailDelivery, EmailJob, EmailJobPage,
+    EmailJobQuery, EmailJobSubmission, EmailJobUpdate, EmailOption, Error, InvoiceDocument,
+    InvoiceId, InvoicePage, JobFilter, JobId, JobStatus, Journal, JournalFilter, JournalType,
+    Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest, PrintItem, PrintJob,
+    PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered, Separator, Shipping,
+    Specification, Terms, TransactionFilter, TransactionPage, TransactionQuery, TransportKind,
 };
 use serde_json::json;
 
@@ -193,7 +192,7 @@ fn date_exposes_its_parts_and_rejects_impossible_calendars() {
     assert_eq!(date.to_string(), date.to_string());
     assert_eq!(format!("{date}"), "2026-10-24");
     assert_eq!("2026-10-24".parse::<Date>().unwrap(), date);
-    assert_eq!(Date::new(2026, 1, 31).unwrap().days_since_epoch() > 0, true);
+    assert!(Date::new(2026, 1, 31).unwrap().days_since_epoch() > 0);
     assert!(!date.is_after(&date));
 
     assert!(Date::new(0, 1, 1).is_err());
@@ -223,7 +222,10 @@ fn every_letter_builder_lands_on_the_wire() {
 
     let terms = Terms::new(b"%PDF-1.4\nterms\n").unwrap().on_all_pages(true);
     assert_eq!(terms.to_json()["terms_on_all_pages"], 1);
-    assert!(Terms::new(b"%PDF-1.4\nterms\n").unwrap().to_json()["terms_on_all_pages"] == 0);
+    assert_eq!(
+        Terms::new(b"%PDF-1.4\nterms\n").unwrap().to_json()["terms_on_all_pages"],
+        0
+    );
 
     let bank_form = BankForm::generated(
         "A&O Fischer GmbH",
@@ -555,6 +557,7 @@ fn print_item_defaults_are_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(clippy::too_many_lines)] // one row per error variant, on purpose
 fn every_error_variant_renders_and_classifies() {
     let cases: Vec<(Error, Option<u16>, bool, bool)> = vec![
         (Error::invalid("letter.notice", "empty"), None, false, false),
@@ -828,7 +831,7 @@ async fn recording_transport_can_be_drained() {
     assert_eq!(recorder.requests().len(), 1);
     let drained = recorder.take_requests();
     assert_eq!(drained.len(), 1);
-    assert!(recorder.requests().is_empty());
+    assert_eq!(recorder.requests().len(), 0);
 }
 
 #[test]
@@ -855,7 +858,7 @@ fn responses_expose_headers_body_and_parsed_json() {
 
 #[test]
 fn mock_transport_reports_remaining_script_and_supports_push() {
-    let mut mock = MockTransport::default();
+    let mock = MockTransport::default();
     assert_eq!(mock.remaining(), 0);
     mock.push(Ok(Response::json_response(200, "{}")));
     assert_eq!(mock.remaining(), 1);
