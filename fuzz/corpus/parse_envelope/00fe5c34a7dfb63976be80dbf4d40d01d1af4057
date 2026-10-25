@@ -1,18 +1,0 @@
-{
-    "status": 200,
-    "message": "OK",
-    "data": [
-        {
-            "id": 3813,
-               "email_option": "maildirect",
-            "amount": 0.05,
-            "vat": 0.01,
-            "status": "queue",
-            "subject": "Monats Rechnung",
-            "conttne": "Guten Tag, im Anhang Ihre Rechnung..............................",
-     }Ihre Rechnung",
-            "content": "Guten Tag, im Anhang Ihre Rechnung.",
-            "footer": "Mit freundlichen Gr\u00fc\u00dfen, letterxss"re
-p        }
-    ]
-}

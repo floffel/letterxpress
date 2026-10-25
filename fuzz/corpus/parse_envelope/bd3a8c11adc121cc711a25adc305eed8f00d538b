@@ -1,8 +1,0 @@
-{
-    "status": 200,
-        "vat": 0.01,
-        "status": "queue",
-        "group": "exampleGroup",
-        "subject": "Rechnung",
-        "content": "ly"
-}

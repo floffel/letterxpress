@@ -1,9 +1,0 @@
-{
-    "status": 200,
-    "message": "OK",
-    "data": {
-        "transactions": [
-            {
-                "amount": -1.04,
-                "currency": "EUR",
-                   },    "last_page_url"

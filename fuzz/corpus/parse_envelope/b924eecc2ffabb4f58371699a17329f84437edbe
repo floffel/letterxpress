@@ -1,8 +1,0 @@
-{
-    "status": 200,
-    "me*ssage": "OK",
-    "data": {
-        "balance": 54.89,
-        "currency": "EUR"
-    }
-}
