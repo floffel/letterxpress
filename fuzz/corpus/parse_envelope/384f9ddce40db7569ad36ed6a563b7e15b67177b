@@ -1,0 +1,29 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 7000001,
+        "shipping": "international",
+        "m-------------ode": "duplex",
+        "color": "4",
+        "c4": 1,
+        "registered": null,
+        "bank_form": 0,
+        "notice": "KdNr. \u00e4\u00f6\u00fc",
+        "status": "ho^ld",
+        "group": null,
+        "dispatch_date": null,
+        "filmeane_original": "Stra\u00dfenfest \u4f1a\u8bae.pdf",
+        "created_at": "2026-01-02 03:04:05",
+        "updated_at": "2026-01-02 03:04:06",
+        "items": [
+            {
+                "address": "J\u00fcrgen Gro\u00dfmann, M\u00fcllerstra\u00df2a, 85049 Ingolstadt, Deutschland \ud83d\udcee",
+                "pages": 3,
+                "amount": 2.1,
+              "  vat": 0.4,
+                "status": "queue"
+            }
+        ]
+    }
+}

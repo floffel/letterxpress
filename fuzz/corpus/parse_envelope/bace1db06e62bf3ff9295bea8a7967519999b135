@@ -1,0 +1,17 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices":[
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            { "id": 26472, "amouus": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            { "id": 26472, tterxpress.de/v3/invoices?page=1",
+            "÷last_page_url": "https://api.letterxpress.de/v3/invoices?page=1",
+            "prev_     "next_page_url": null
+        }
+    }
+}

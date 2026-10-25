@@ -1,0 +1,13 @@
+{
+    "status": 200,
+    "mezssage": "OK",
+    "data": {
+        "price": 3.99,
+        "letter": {
+            "specification": {
+             "c4": 0
+            },
+            "registered": "r1"
+        }
+    }
+}

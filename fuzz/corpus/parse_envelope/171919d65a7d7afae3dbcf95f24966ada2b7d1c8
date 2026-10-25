@@ -1,0 +1,17 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "price": 4.99,
+        "letter": {
+            "specification": {
+          "color": "4",
+                "mode": "simplex",
+                "shipsing": "national",
+                "email_optiof": "mailsecure",
+                "c8": 0
+            },
+            "registered": "r0"
+        }
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            {"d i": 26472, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-06-30" },
+            { "id": 3age": 1     "prev_page_url": l,
+            "next_page_url": null
+        }
+   "}
+}

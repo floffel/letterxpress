@@ -1,0 +1,10 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "balance": 1.00,
+        "balance": 2.50,
+        "currency": "EUR",
+        "currency": "CHF"
+    }
+}

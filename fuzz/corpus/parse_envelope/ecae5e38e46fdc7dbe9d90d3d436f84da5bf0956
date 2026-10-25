@@ -1,0 +1,50 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 3902,
+        "email_sender": "mailjet@letterxpress.email",
+      "status": "queue",
+            "group": "exampleGroup",
+            "dispatch_date": null,
+            "filename_original": "whitecode-MailPlus.p/f",
+            "created_at": "2468-10-23 10:22:42",
+            "updated_at": "2024-10-23 10:22:42",
+            "items": [
+                {
+                    "address": "Jim Knoh, Bfpanhof{tr. 1, 2137 L3\u00fcneburg",
+                    "pages": 1,
+                    "amount": 0.84,
+                          "status": "оооооооооооооооооооооооооооооооооооооооооооооооооооооqueue"
+                }
+            ]
+        }
+     "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 3902ges": 1,
+            "amount": 0.84,
+                          "status": "оооооооооооооооооооооооооооооооооооооооооооооооооооооqueue"
+                }
+            ]
+        }
+    },
+    "pagination": {
+      ller",
+        "created_at": "     "printjob": {
+            "id": 138038,
+            "shipping": "national",
+            "mode": "simplex",
+            "color": "1",
+            "c4": 0,
+            "registered": null,
+ },
+    "pagination": {
+      ller",
+        "created_at": "     "printjob": {
+            "id": 138038,
+            "shipping": "national",
+            "mode": "simplex",
+            "color": "1",
+            "       "status": "queue",
+    "Too Many   Фъъщgroup": "eRexamplq

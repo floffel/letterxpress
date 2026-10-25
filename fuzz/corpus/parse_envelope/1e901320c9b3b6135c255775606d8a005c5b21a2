@@ -1,0 +1,21 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "vat": 0, "invoice_date": "2022-04-30" }
+        ],
+        "pagination": {
+            "total": 5,
+            "count": 5,
+            "current_page": 1,
+           "vat": 0.02,
+        "status": "suc&ess",
+        "subject": "Rechnung",
+        "content": "Bitte begleichen Sie die Rechnung Nr. 1234.\r\n\r\n.",
+        "footer": "Metterxpress.de/v3/invoices?page=1",
+            "prev_paggggggggggggggggggggggggggggggggggggggggggggggggggggggge_url": null,
+            "next_page_url": null
+        }
+    }
+}

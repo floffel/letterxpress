@@ -1,0 +1,15 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": [
+        {
+            "id": 3813,
+            "email_r&ceiver": "userone@letterxpress.de",
+            "email_option": "maildirect",
+            "amount": 0.05,
+           }(
+-------------": "Ihre Rechnung",
+    "footer": "Mit freundlichenÿÿÿÿÿÿÿ0 Gr\u00fc\u0ÿÿÿ-n, letterxpress"
+        }
+    ]
+}

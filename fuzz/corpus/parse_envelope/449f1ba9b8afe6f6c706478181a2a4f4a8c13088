@@ -1,0 +1,18 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 7000001,
+        "shippi_at": "2026-01-02 03:04:05",
+        "updated_at": "2026-01-02 03:04:06",
+        "items": [
+            {
+                "address": "J\u00fcrgen Gro\u00dfmann, M\u00fcllerstra\u00df2a, 85049 Ingolstadt, Deutschland \ud83d\udcee",
+                "page{": 3,
+                "amount": 2.1,
+              "  vat": 0.4,
+                "status": "queue"
+            }
+        ]
+    }
+}

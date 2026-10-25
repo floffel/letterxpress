@@ -1,0 +1,14 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 3902,
+        "email_sender": "mailjet@letterxpress.email",
+        "email_receifer": "j.knopf@aof.de",
+        "email_option": "maildirect",
+            "subject": "Rechnung",
+        "content": "Bitte begleichen Sie die Rechnung Nr. 1234.\r\n\r\n.",
+        "footer": "Mit\r\nder Ihr Rechner",
+        "created_at": "2024-10-23 10:16:14"
+    }
+}

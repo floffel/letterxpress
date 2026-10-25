@@ -1,0 +1,37 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 918,
+        "email_sender": "mailjet@letterxpress.email",
+        "email_receiver": "j.knopf@aof.de",
+        "email_option": "mailplus",
+        "amount": 0.1,
+        "vat": 0.02,
+        "status": "success",
+        "subject": "Rechnung",
+        "content": "Bitte begleichen Sie die Rechnung Nr. 1234.\r\n\r\n.",
+        "footer": "Mit Gr\u00fc\u00dfen,\r\n\r\n Ihr Rechnungssteller",
+        "printjob": {
+            "id": 138037,
+            "shipping": "national",
+            "mode": "simplex",
+            "color": "1",
+            "c4": 0,
+            "registered": "r1",
+            "bank_form": 0,
+            "notice": null,
+            "status": "done",
+            "group": "example3/invoices?page=1",
+            "last_page_url": "https://api.letterxpress.de/v3/invoices?page=1",
+            "prev_page_url": null,
+            "next_page_url": null
+        }
+    }
+}

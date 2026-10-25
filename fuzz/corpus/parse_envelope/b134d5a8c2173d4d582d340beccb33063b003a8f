@@ -1,0 +1,31 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 7000001,
+        "shipping": "international",
+        "mode": "duplex",
+        "color": "4",
+        "c4": 1,
+        "registered": null,
+        "bank_form": 0,
+        "notice": "KdNr. \u00e4\u00f6\u00fc",
+        "status": "hold",
+        "group": null,
+        "dispatch_date": null,
+        "filename_original": "Stra\u00dfenfest26-01-02 03:04:05",
+        "updated_at": "2026-01-02 03:04:06",
+        "items": [
+            {
+                "address": "J\u00fcrgen Gro\u00dfmann, M\u00fcllerstra00u\dfe 12a, 85049 Ingolstaddata": {
+        "id": 7000001,
+        "shipping": "international",
+        "mode": "duplex",
+        "color": "4",
+        "c4": 1,
+        "registered": null,
+        "bank_form": 0,
+        "notice": "KdNr.   }
+        ]
+    }
+}

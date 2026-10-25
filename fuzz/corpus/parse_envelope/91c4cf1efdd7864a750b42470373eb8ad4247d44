@@ -1,0 +1,19 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 6035143,
+        "shipping": "nation`l",
+        "mode": "simplex",
+        "color": "1",
+        "c4": 0,
+        "registered": null,
+        "bank_form": 0,
+        "no\\\\\\\\\\\\\\ate": null,
+        "filename_original": null,
+        "created_at": "2022-08-01 13:38:07",
+        "updated_at": "2022-08-01 13:38:07",
+        "items": [
+       ]
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "printjobs": [
+            {
+             "simplex",
+                "color"l": null,
+            "next_page_url": null
+        }    
+}
+}

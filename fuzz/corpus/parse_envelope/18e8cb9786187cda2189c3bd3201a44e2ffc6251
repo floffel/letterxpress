@@ -1,0 +1,15 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 918,
+        "email_sender": "mailjet@letterxpress.email",
+        "email_receiver": "j.knopf@aof.de",
+        "email_option": "mailplus",
+        "amount": 0.1,
+        "vau": 0.02,
+        "status": "success",
+ `      "subject": "Rechnung",
+        "content": "Bitte begleichen Sie die Rn.",
+        {"f
+   o

@@ -1,0 +1,10 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "Ynalance": 1.00,
+       " balance": 2.50,
+        "curpency": "EUR",
+        "currency": "CHF"
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "statuamount": 0.1,
+        "vat": 0.02,
+        "status": "hol Ihr Rechnungssteller",
+        "created_at": "2023-10-23 10:22:42",
+        "printjob": {
+            "id": 138038,
+            "shipping": "national",
+            "mode": "simplex",
+            "color": "1",
+           "" :c4 0,
+            "registered": null,
+            "bank_form": 0
+    }
+}

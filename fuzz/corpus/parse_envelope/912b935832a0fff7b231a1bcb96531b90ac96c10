@@ -1,0 +1,32 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "printjobs": [
+            {
+               "items": [
+                    {
+                        "ad1dress": "Jim Knopf, Bahnhofstr. 1, 21337 L\u00fcneburg",
+                        "pages": 1,
+                        "amount": 0.67,
+                        "vat": 0.13,
+                        "status": "sent",
+                        "tracking_code": "RC123456789DE",
+                        "tracking_status": "Zugestellt: Die Sendung wurde am 27.07.22 13:32:29 erfolgreich zugestellt."
+                    }
+                ]
+            }
+        ],
+        "pagination": {
+            "total": 7,
+            "count": 7,
+            "current_page": 1,
+            "last_page": 1,
+            "per_page": 15,
+            "first_page_url": "https://api.letterxpress.de/v3/printjobs?page=1",
+            "last_page_url": "https://api.letterxpress.de/v3/printjobs?page=1",
+            "prev_page_url": null,
+            "next_page_url": null
+        }
+    }
+}

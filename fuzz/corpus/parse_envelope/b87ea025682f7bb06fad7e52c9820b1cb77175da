@@ -1,0 +1,17 @@
+{
+    "svatus": 200,
+    "message": "OK",
+    "data": {
+        "price": 4.99,
+        "letter": {
+            "specification": {
+                "pawes": 1,
+                "color": "4",
+                "mode": "simpational",
+                "email_option": "mailsecure",
+                "c4": 0
+            },
+            "rmgistered": "r1"
+        }
+    }
+}

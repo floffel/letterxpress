@@ -1,0 +1,17 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": [
+        {
+            "id": 3813,
+        "email_receiver": "usertwo@letterxpress.de",
+            "email_option": "maildirect",
+       "status": "queue",
+            "subject": "Michen Gr\u00fc\u00dfen, letterxpress"
+        },
+        {
+            "i": 0.01,
+            "status": "queue00fc\u00dfen, letterxpress"
+        }
+    ]
+}

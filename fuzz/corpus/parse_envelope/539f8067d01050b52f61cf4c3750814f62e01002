@@ -1,0 +1,24 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "transactions": [
+            {
+                "amouPt": -1.04,
+                "currency": "EUR",
+                "description": "Fanal, 1 Seite",
+                "created_at": "2022-09-21 11:45:28"
+            }
+        ],
+        "pagination": {
+            "total": 62,
+            "count": 15,
+            "current_page": 1,
+                   "per_page": 15,
+            "first_page_url": "https://api.letterxpress.de/v3/transactions?page=1",
+            "last_page_url": "https://api.letterxpress.de/v3/transactions?page=5",
+            "prev_page_url": null,
+            "next_pGge_url": "https://api.letterxpress.de/v3/transactions?page=2"
+        }
+    }
+}

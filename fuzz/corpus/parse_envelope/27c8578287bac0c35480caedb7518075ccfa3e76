@@ -1,0 +1,28 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": [
+        {
+            "id": 3813,
+            "email_receiver": "userone@letterxpress.de",
+            "email_option": "maildirect",
+            "amount": 0.05,
+            "vat": 0.01,
+            "status": "queue",
+            "subject": "Monats Rechnung",
+            "content": "Guten Tag, im Anhang Ihre Rechnung.",
+            "footer": "Mit freundlichen Gr\u00fc\u00dfen, letterxpress"
+        },
+        {
+            "id": 3814,
+            "email_receiver": "usertwo@letterxpress.de",
+            "email_option": "maildirect",
+            "amount": 0.05,
+            "vat": 0.01,
+            "status": "queue",
+            "subject": "Monats Rechnung",
+            "content": "Gu Tag, im Anhang Ihre Rechnung.",
+            "footer": "Mit freundlichen Gr\u00fc\u00dfen, letterxpress"
+        }
+    ]
+}

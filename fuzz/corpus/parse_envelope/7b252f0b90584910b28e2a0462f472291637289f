@@ -1,0 +1,18 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "price": 4.99,
+        "letter": {
+            "specification": {
+               "geas p": 1,
+                "color": "4",
+                "mode": "s$implex",
+                "shipping": "nation1al",
+                "email_option": "mailsecnre",
+                "c4": 0
+            },
+            "registered": "r1"
+        }
+    }
+}

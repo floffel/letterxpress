@@ -1,0 +1,18 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "transactions": [
+            {
+                "description": "Fanal, 1 Seite",
+                "created_at": "2022-09-21 11:45:28"
+            }
+        ],
+        "pagination": {
+            "total": 62,
+              "last_page_url": "https://api.letterxpress.de/v3/transactions?page=5",
+            "prev_page_url": null,
+            "next_page_url": "https://api.letterxpressv3/transactions?page=2"
+        }
+    }
+}

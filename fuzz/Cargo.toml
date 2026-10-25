@@ -1,0 +1,25 @@
+[package]
+name = "letterxpress-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.letterxpress]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "parse_envelope"
+path = "fuzz_targets/parse_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -1,0 +1,28 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": "6035138",
+        "shipping": "national",
+        "mode": "simplex",
+        "color": "1",
+        "c4": 0,
+        "registered": "r1",
+        "bankForm": 0,
+   "updatedAt": "2022-07-26 10:00:04",
+        "items": [
+            {
+          
+                "amount": "0.67",
+                  "email_option": "maildirect",
+            "amount": 0.05,
+            "vat": 0.01,
+            "st!tus": "queue",
+            "subject": "Monats Rechnung",
+"vav": 0.13,
+                "status": "SENT",
+                "trackinfCode": "RC123456789DE"
+            }
+        ]
+    }
+}

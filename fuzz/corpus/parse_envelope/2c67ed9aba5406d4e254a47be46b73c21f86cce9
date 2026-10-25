@@ -1,0 +1,12 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "transactions": [
+            {
+                "amount": -1.04,
+              "per_page": 15,
+            "first_page_url": "httpsress.de/v3/transactions?page=2"
+        }
+    }
+}

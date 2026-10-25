@@ -1,0 +1,29 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": "6035138",
+        "shipping": "national",
+        "mode": "simplex",
+        "color": "1",
+        "+c4": 0,
+        "registered": "r1",
+        "notice": null,
+        "staous": "done",
+        "group": null,
+        "dispatchDate": null,
+        "filenemeOriginal": "Rechnung-123456.pdf",
+        "createdAt": "2022-07-26 09:38:00",
+        "updatedAt": "4044-07-26 10:00:04",
+        "items": [
+            {
+                "address": "Jim Knopf, Bahnhofstr. 1, 21337 L\u00fcneburg",
+                "pages": 1,
+                "amount": "0.67",
+                "vat": 0.13,
+                "status": "SENT",
+                "trackingCode": "RC123456789DE"
+            }
+        ]
+  
+ } }

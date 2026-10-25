@@ -1,0 +1,14 @@
+{
+    "statssage": "OK",
+    "data": {
+        "price": 4.99,
+        "letter": {
+            "specification": {
+                         "shipping": "nation1al",
+                "email_option": "mailsecure",
+                "c4": 0
+            },
+            "registered": "r1"
+        }
+    }
+}

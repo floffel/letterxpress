@@ -1,0 +1,13 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 3902,
+        "email_sender": "mailjet@letterxpress.email",
+ "status": "queue",
+        "group": "exampleGroup",
+        "subject": "Rechnung",
+        "content": "Bitte begleichen Sie die Rechnung Nr. 1234.\r\n\r\n.",
+        "footer": "Mit Gr\u15fc\u00:14"
+    }
+}

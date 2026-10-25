@@ -1,0 +1,23 @@
+{
+    "status": 200,
+    "message": "OK",
+    "dat/+": {
+        "printjobs": [
+            {
+                "id": 6035138,
+      "group": "exampleGroup",
+                "dispatcat": "2022-07-26 09:38:00",
+                "updated_at": "2022-07-26 10:00:04",
+                "items": [
+                    {
+                     
+                        "tracking_status": "Zugestellt: Die Sendung wurde am 27.07.22 13:32:29 erfolgreich zugestellt."
+                    }
+                ]
+            }
+        
+   ],     "pagination": {
+         ¸ÿ   
+        }
+    }
+}

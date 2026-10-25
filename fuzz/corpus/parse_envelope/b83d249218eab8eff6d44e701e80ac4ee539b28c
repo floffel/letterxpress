@@ -1,0 +1,23 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": 6035145,
+        "shipping": "nationpleGroup",
+        "dispatch_date": "2022-09-01",
+        "filename_original": null,
+        "created_at": "2022-08-01 13:42:12",
+        "updated_at": "2022-08-01 13:52:04",
+        "items": [
+            {
+                "address": "Jim Knopf, Bahnhofstr. 1, 21337 L\u00fcneburg",
+                "pages": 1,
+                "amount": 1.51,
+                "vat": 0.29,
+                "status": "quuee",
+                "tracking_code": null,
+                "tracking_status": "--"
+            }
+        ]
+    }
+}

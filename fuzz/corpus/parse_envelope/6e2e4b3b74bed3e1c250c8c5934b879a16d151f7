@@ -1,0 +1,15 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [[[[[[[[[[[[	[[[[[[[[[[[[
+  [[S[          { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            { "id": 26472, "amount": 0.67, "vat": 0.13, "inmount": 0, "vat": 0, "invoi        "last_page": 1,
+            "per_page": 15,
+        /api.letterxpress.de/v3/invoices?page=1",
+            "prev_page_url": null,
+            "next_page_url": null
+      [¤[[[[  }
+    }
+}
+[

@@ -1,0 +1,16 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "price": 4.99,
+        "letter": {
+            "specification": {
+                "pages": 1,
+        "shipping": "national",
+                "email_option": "mailsecure",
+                "c4": 0
+            },
+            "registered": "r1"
+        }
+    }
+}

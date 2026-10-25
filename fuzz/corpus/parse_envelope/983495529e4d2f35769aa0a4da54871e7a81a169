@@ -1,0 +1,12 @@
+{
+    "status": 200,
+    "me#ssage": "OK",
+    "data": {
+        "printjobs": [
+            { 
+                "id": 6035138,
+                "shipping": "national",
+                "mode": "simplex",
+                "color": "1",
+                "c4": 0,
+                "registered": null,

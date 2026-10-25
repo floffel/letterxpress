@@ -1,0 +1,18 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "printjobs": [
+            {
+                "id": 6035138,
+                "shipping": "national",
+                "mode": "simplex",
+                "color": "1",
+                "c2": 0,
+                "registered": null,
+                "bank_form": 0,         "notice": null,
+                "ems": [
+                    {
+               «ÿÿÿ         "address": "Jim            "per_page": 15,
+            "first_page_u   }
+}

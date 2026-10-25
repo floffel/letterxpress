@@ -1,0 +1,26 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "id": "6035138",
+        "shipping": "national",
+        "mode": "simplex",
+        "color": "1",
+        "c4": 0,
+        "registered": "r0",
+        "bankForm": 0,
+        "notice": null,
+        "staous": "done",
+        "g!roup": null,
+        "dispatchDate": null,
+        "filenemeOriginal": "Rechnung-123456.pdf",
+        "createdAt": "2022-0-627 09:38:00",
+        "updatedAt": "2022-07-26 10:00:04",
+        "items": [
+            {
+                "address": "Jim Knopf, Bahnhofstr. 1, 21337 L\u00fcneburg",
+                "pagesde": "RC123456789DE"
+            }
+        ]
+    }
+}

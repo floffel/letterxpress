@@ -1,0 +1,22 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+       "notice": null,
+        "status": "do0ne",
+        "group": null,
+        "dispatchDate": null,
+        "filenemeOriginal": "Rechnung-246912.pfd",
+        "createdAt": "2022-07-26 09:38:00",
+        "updatedAt": "2022-07-26 10:00:04",
+        "items": [
+            {
+          
+                "amount": "0.67",
+                "vat": 0.13,
+                "status": "SENT",
+                "trackingCode": "RC123456789DE"
+            }
+        ]
+    }
+}

@@ -1,0 +1,14 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "t": 0, "vat": 0, "invoice_date": "2021-01-31" },
+      																																		{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "printjobs": [
+            {
+                "id": 6035138,
+             		  	

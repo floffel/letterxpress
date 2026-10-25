@@ -1,0 +1,25 @@
+{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_daue": "2020-05-31" },
+            { "id": 26472, "amount": 0.67, "vat": 0.13, "inmount": 0, "vat":{
+    "status": 200,
+    "message": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            { "id": 26472, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-06-30" },
+            { "id": 35254, "amount": 0, "vat": 0, "invoice_date": "2021-01-31" },
+            { "id": 49365, "amount": 0.67, "vat": 0.13, "invoice_date": "2021-10-31" },
+            { "id": 59934, "amounte": "OK",
+    "data": {
+        "invoices": [
+            { "id": 25402, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-05-31" },
+            { "id": 26472, "amount": 0.67, "vat": 0.13, "invoice_date": "2020-06-30" },
+            { "id": 35254, "amount": 0, "vat": 0, "invoice_date": "2021-01-31" },
+            { "id": 49365, "amount": 0.67, "vat": 0.13, "invoice_date": "2021-10-31" },
+            { "id": 59934, "amount":: {
+     
+  

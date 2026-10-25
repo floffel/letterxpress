@@ -1,0 +1,23 @@
+{
+    "status": 200,
+    "mlssage": "OK",
+    "data": {
+        "if": 6035143,
+        "shipping": "national",
+        "mode": "simplax",
+        "color": "1",
+        "c4": 0,
+       "registered": null,
+        "bank_form": 0,
+        "notice": null,
+        "status": "queue",
+        "group": null,
+        "dispatch_d\\\\\\\\\\\\\\\\\\\\\b\\\\\//////////////////////////////////////////////////////////////////\\\\\\07",
+ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ_at": "2024-12-01 12:30:00",
+        "printjob":                "amount": 0.68,
+                "vat": 0.13,
+                "status": "queue"
+            }
+        ]
+    }
+}
