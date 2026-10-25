@@ -1,0 +1,41 @@
+[package]
+name = "letterxpress"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0 OR MIT"
+description = "Typed async client for the LetterXpress API v3 (physical letter mailing): print jobs, SMART@MAIL email jobs, prices, balance, journal, transactions and invoices"
+repository = "https://github.com/floffel/letterxpress"
+documentation = "https://docs.rs/letterxpress"
+keywords = ["letterxpress", "postal", "letter", "mail", "api-client"]
+categories = ["api-bindings"]
+readme = "README.md"
+exclude = [".github/**", "deny.toml", "fuzz/**", "clippy.toml"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["http"]
+http = ["dep:reqwest", "dep:tokio"]
+
+[dependencies]
+base64 = "0.22"
+md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

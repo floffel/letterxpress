@@ -1,0 +1,15 @@
+# Clippy configuration for the crate.
+#
+# `doc_markdown` treats CamelCase tokens in prose as identifiers. The provider's
+# own product names are words, not code, so they are declared valid here rather
+# than quoted in every sentence.
+doc-valid-idents = [
+    "LetterXpress",
+    "SMART@MAIL",
+    "MailPlus",
+    "MailDirect",
+    "MailSecure",
+    "Postbox",
+    "Warenkorb",
+    "..",
+]
