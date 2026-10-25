@@ -205,7 +205,7 @@ silently fix in the product repo (they are reported there):
 ## Testing
 
 ```
-cargo test --all-features     # 466 tests: fixtures, edge matrix, properties, 32-task concurrency, 295 doctests
+cargo test --all-features     # 464 tests: fixtures, edge matrix, properties, 32-task concurrency, 295 doctests
 cargo test --no-default-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_envelope

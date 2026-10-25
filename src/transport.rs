@@ -467,7 +467,7 @@ impl MockTransport {
     /// mock.push(Ok(Response::json_response(200, "{}")));
     /// assert_eq!(mock.remaining(), 1);
     /// ```
-    pub fn push(&mut self, result: Result<Response>) {
+    pub fn push(&self, result: Result<Response>) {
         lock(&self.state).script.push_back(result);
     }
 
