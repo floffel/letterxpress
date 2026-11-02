@@ -809,7 +809,10 @@ async fn a_successful_reply_with_an_empty_data_object_is_not_an_error() {
 }
 
 #[tokio::test]
-async fn email_job_submission_rejects_an_unknown_shape() {
+async fn an_email_submit_reply_of_an_unknown_shape_is_ambiguous() {
+    // The provider accepted the job (2xx) and then sent `data` we cannot read.
+    // Reporting that as a shape error would tell the caller to fix and resend —
+    // and buy the e-mail a second time.
     let client = client_for(200, r#"{"status":200,"data":{"nothing":"here"}}"#);
     let letter = Letter::new(&pdf())
         .expect("letter")
@@ -818,12 +821,41 @@ async fn email_job_submission_rejects_an_unknown_shape() {
     let error = client
         .submit_email_job(&letter)
         .await
-        .expect_err("must fail");
-    assert!(matches!(
-        error,
-        Error::UnexpectedShape {
-            endpoint: "POST /v3/emailjobs",
-            ..
-        }
-    ));
+        .expect_err("a job we cannot name is not a success");
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("POST /v3/emailjobs"), "{error}");
+}
+
+#[tokio::test]
+async fn a_print_submit_reply_that_does_not_decode_is_ambiguous() {
+    // The boundary in one place: the same broken body is a shape error on a read
+    // (which cannot create anything) and an ambiguity on a submit (which can).
+    let body = r#"{"status":200,"data":{"id":6035143,"items":"not a list"}}"#;
+    let submitter = client_for(200, body);
+    let letter = Letter::new(&pdf()).expect("letter");
+    let error = submitter
+        .submit_print_job(&letter)
+        .await
+        .expect_err("must not look terminal");
+    assert!(error.is_ambiguous(), "{error:?}");
+
+    let reader = client_for(200, body);
+    let error = reader
+        .print_job(&JobId::new("6035143").expect("id"))
+        .await
+        .expect_err("a read keeps the shape error");
+    assert!(matches!(error, Error::UnexpectedShape { .. }));
+    assert!(!error.is_ambiguous());
+}
+
+#[tokio::test]
+async fn a_submit_2xx_without_data_is_ambiguous_too() {
+    let client = client_for(200, r#"{"status":200,"message":"OK"}"#);
+    let letter = Letter::new(&pdf()).expect("letter");
+    let error = client
+        .submit_print_job(&letter)
+        .await
+        .expect_err("nothing to name the job with");
+    assert!(error.is_ambiguous(), "{error:?}");
 }

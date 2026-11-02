@@ -877,7 +877,7 @@ impl<T: Transport> Client<T> {
     /// [`Error::Ambiguous`] when a submit may have been processed.
     pub async fn balance(&self) -> Result<Balance> {
         let envelope = self.call(Method::Get, "/balance", None, None).await?;
-        decode_data("GET /v3/balance", envelope)
+        decode_data("GET /v3/balance", Method::Get, envelope)
     }
 
     /// `GET /v3/price` — quote a letter without submitting one.
@@ -905,7 +905,7 @@ impl<T: Transport> Client<T> {
     pub async fn price(&self, request: &PriceRequest) -> Result<Price> {
         let body = json!({ "letter": request.to_json() });
         let envelope = self.call(Method::Get, "/price", None, Some(body)).await?;
-        decode_data("GET /v3/price", envelope)
+        decode_data("GET /v3/price", Method::Get, envelope)
     }
 
     /// `GET /v3/printjobs` — one page of print jobs, newest first.
@@ -931,7 +931,7 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Get, "/printjobs", query.to_query_string(), None)
             .await?;
-        decode_data("GET /v3/printjobs", envelope)
+        decode_data("GET /v3/printjobs", Method::Get, envelope)
     }
 
     /// `GET /v3/printjobs/{id}`.
@@ -963,7 +963,7 @@ impl<T: Transport> Client<T> {
                 None,
             )
             .await?;
-        decode_data(endpoint, envelope)
+        decode_data(endpoint, Method::Get, envelope)
     }
 
     /// `POST /v3/printjobs` — submit a letter.
@@ -995,7 +995,7 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Post, "/printjobs", None, Some(body))
             .await?;
-        decode_data("POST /v3/printjobs", envelope)
+        decode_data("POST /v3/printjobs", Method::Post, envelope)
     }
 
     /// `PUT /v3/printjobs/{id}` — change options within 15 minutes.
@@ -1028,7 +1028,7 @@ impl<T: Transport> Client<T> {
                 Some(body),
             )
             .await?;
-        decode_data("PUT /v3/printjobs/{id}", envelope)
+        decode_data("PUT /v3/printjobs/{id}", Method::Put, envelope)
     }
 
     /// `DELETE /v3/printjobs/{id}` — cancel within 15 minutes.
@@ -1088,15 +1088,18 @@ impl<T: Transport> Client<T> {
     /// the provider's answer mapped as described on [`Error`] — including
     /// [`Error::Ambiguous`] when a submit may have been processed.
     pub async fn submit_email_job(&self, letter: &Letter) -> Result<EmailJobSubmission> {
+        let endpoint = "POST /v3/emailjobs";
         let body = json!({ "letter": letter.to_json() });
         let envelope = self
             .call(Method::Post, "/emailjobs", None, Some(body))
             .await?;
-        let data = envelope.require_data("POST /v3/emailjobs")?;
-        EmailJobSubmission::parse(data).map_err(|error| Error::UnexpectedShape {
-            endpoint: "POST /v3/emailjobs",
-            message: error.to_string(),
-        })
+        let decoded = envelope.require_data(endpoint).and_then(|data| {
+            EmailJobSubmission::parse(data).map_err(|error| Error::UnexpectedShape {
+                endpoint,
+                message: error.to_string(),
+            })
+        });
+        after_response(Method::Post, decoded)
     }
 
     /// `GET /v3/emailjobs` — one page of e-mail jobs.
@@ -1159,7 +1162,7 @@ impl<T: Transport> Client<T> {
                 None,
             )
             .await?;
-        decode_data("GET /v3/emailjobs/{id}", envelope)
+        decode_data("GET /v3/emailjobs/{id}", Method::Get, envelope)
     }
 
     /// `PUT /v3/emailjobs/{id}` — change the recipient within 15 minutes.
@@ -1191,7 +1194,7 @@ impl<T: Transport> Client<T> {
                 Some(body),
             )
             .await?;
-        decode_data("PUT /v3/emailjobs/{id}", envelope)
+        decode_data("PUT /v3/emailjobs/{id}", Method::Put, envelope)
     }
 
     /// `DELETE /v3/emailjobs/{id}` — cancel within 15 minutes.
@@ -1246,7 +1249,7 @@ impl<T: Transport> Client<T> {
     pub async fn journal(&self, filter: &JournalFilter) -> Result<Journal> {
         let body = json!({ "filter": filter.to_json() });
         let envelope = self.call(Method::Get, "/journal", None, Some(body)).await?;
-        decode_data("GET /v3/journal", envelope)
+        decode_data("GET /v3/journal", Method::Get, envelope)
     }
 
     /// `GET /v3/transactions` — ledger entries, newest first.
@@ -1272,7 +1275,7 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Get, "/transactions", query.to_query_string(), None)
             .await?;
-        decode_data("GET /v3/transactions", envelope)
+        decode_data("GET /v3/transactions", Method::Get, envelope)
     }
 
     /// `GET /v3/invoices` — invoice summaries.
@@ -1300,7 +1303,7 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Get, "/invoices", Some(format!("page={page}")), None)
             .await?;
-        decode_data("GET /v3/invoices", envelope)
+        decode_data("GET /v3/invoices", Method::Get, envelope)
     }
 
     /// `GET /v3/invoices/{id}` — one invoice with its PDF.
@@ -1331,7 +1334,7 @@ impl<T: Transport> Client<T> {
                 None,
             )
             .await?;
-        decode_data("GET /v3/invoices/{id}", envelope)
+        decode_data("GET /v3/invoices/{id}", Method::Get, envelope)
     }
 
     /// Sends one request: attaches the `auth` object, enforces the timeout and
@@ -1375,11 +1378,7 @@ impl<T: Transport> Client<T> {
             Ok(response) => response,
             Err(error) => return Err(classify_transport(error, method)),
         };
-        let decoded = parse_envelope(endpoint, response);
-        match decoded {
-            Err(error) if !method.is_idempotent() => Err(promote_to_ambiguous(error)),
-            other => other,
-        }
+        after_response(method, parse_envelope(endpoint, response))
     }
 }
 
@@ -1423,20 +1422,65 @@ fn classify_transport(error: Error, method: Method) -> Error {
     }
 }
 
-/// A 5xx on a submit is ambiguous too: the job may exist even though the call
-/// failed.
+/// Applies the submit rule to whatever came back from the provider.
+///
+/// A `2xx` proves the provider accepted the request, and a `5xx`, a redirect or
+/// an answer that cannot be read leaves the outcome open: the job may exist.
+/// Only the documented rejections (`4xx`) prove that nothing was created, so
+/// only those keep their variant. Idempotent calls are never promoted — for a
+/// read, a `PUT` or a `DELETE`, repeating the request cannot duplicate a letter.
+fn after_response<T>(method: Method, result: Result<T>) -> Result<T> {
+    match result {
+        Err(error) if !method.is_idempotent() => Err(promote_to_ambiguous(error)),
+        other => other,
+    }
+}
+
+/// Rewrites a failure that may hide a created job as [`Error::Ambiguous`].
+///
+/// A `5xx` may arrive after the job was created; a `2xx` whose body is not
+/// JSON, carries no `data` or decodes to an unexpected shape means the job
+/// exists while the answer naming it is lost. Neither may look terminal: a
+/// caller told "fix and resend" would buy the same letter twice.
 fn promote_to_ambiguous(error: Error) -> Error {
     match error {
         Error::Upstream { status, message } => Error::Ambiguous {
             message: format!("provider answered http {status} after the submit: {message}"),
         },
+        Error::Json { source } => Error::Ambiguous {
+            message: format!(
+                "the submit was answered 2xx but the body is not JSON ({source}), so the job may exist"
+            ),
+        },
+        Error::MissingField { endpoint, field } => Error::Ambiguous {
+            message: format!("{endpoint} answered 2xx without `{field}`, so the job may exist"),
+        },
+        Error::UnexpectedShape { endpoint, message } => Error::Ambiguous {
+            message: format!("{endpoint} answered with an unreadable body ({message}), so the job may exist"),
+        },
         other => other,
     }
 }
 
-/// Decodes `data` into a typed model.
-fn decode_data<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) -> Result<D> {
-    let data = envelope.require_data(endpoint)?;
+/// Decodes `data` into a typed model, classified by `method`.
+///
+/// For a submit a body that does not decode still means "the letter exists", so
+/// the shape error becomes [`Error::Ambiguous`]; for an idempotent call the
+/// decoding error is what the caller gets, because repeating the request cannot
+/// create anything twice.
+fn decode_data<D: DeserializeOwned>(
+    endpoint: &'static str,
+    method: Method,
+    envelope: Envelope,
+) -> Result<D> {
+    let decoded = envelope
+        .require_data(endpoint)
+        .and_then(|data| decode_value(endpoint, data));
+    after_response(method, decoded)
+}
+
+/// `serde_json::from_value` with the endpoint named in the error.
+fn decode_value<D: DeserializeOwned>(endpoint: &'static str, data: Value) -> Result<D> {
     serde_json::from_value(data).map_err(|error| Error::UnexpectedShape {
         endpoint,
         message: error.to_string(),
@@ -1513,6 +1557,109 @@ mod tests {
             .expect_err("must fail");
         assert!(matches!(error, Error::Rejected { status: 400, .. }));
         assert!(!error.is_ambiguous());
+    }
+
+    #[tokio::test]
+    async fn a_submit_answered_2xx_with_an_unreadable_body_is_ambiguous() {
+        // Every way a 2xx can fail to decode after the letter was accepted: a
+        // truncated (not JSON) body, a body without `data`, and `data` of the
+        // wrong shape. None of them may look terminal — the letter is in
+        // production even though the answer naming it is lost.
+        let broken = [
+            r#"{"status":200,"data":{"id":"#,
+            r#"{"status":200,"message":"OK"}"#,
+            r#"{"status":200,"data":"not an object"}"#,
+        ];
+        for body in broken {
+            let client = Client::new(
+                MockTransport::new([Ok(Response::json_response(200, body))]),
+                Credentials::new("u", "k", Mode::Live).expect("credentials"),
+            );
+            let letter = Letter::new(b"%PDF-1.4\n").expect("letter");
+            let error = client
+                .submit_print_job(&letter)
+                .await
+                .expect_err("a job we cannot name is not a success");
+            assert!(error.is_ambiguous(), "{body}: {error:?}");
+            assert!(
+                !error.is_retryable(),
+                "{body}: a resubmit duplicates the letter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_same_unreadable_body_stays_a_shape_error_on_a_read() {
+        // The just-outside value of the same boundary: a `GET` creates nothing,
+        // so the decoding error is what the caller needs, not an ambiguity.
+        let client = Client::new(
+            MockTransport::new([Ok(Response::json_response(
+                200,
+                r#"{"status":200,"data":"not an object"}"#,
+            ))]),
+            Credentials::new("u", "k", Mode::Test).expect("credentials"),
+        );
+        let error = client
+            .print_job(&JobId::new("1").expect("id"))
+            .await
+            .expect_err("must fail");
+        assert!(matches!(
+            error,
+            Error::UnexpectedShape {
+                endpoint: "GET /v3/printjobs/{id}",
+                ..
+            }
+        ));
+        assert!(!error.is_ambiguous());
+    }
+
+    #[test]
+    fn an_unreadable_answer_and_a_5xx_are_promoted_a_rejection_is_not() {
+        let broken_json = serde_json::from_str::<Value>("{").expect_err("truncated");
+        let promoted = [
+            Error::Upstream {
+                status: 503,
+                message: "unavailable".into(),
+            },
+            Error::Json {
+                source: broken_json,
+            },
+            Error::MissingField {
+                endpoint: "POST /v3/printjobs",
+                field: "data",
+            },
+            Error::UnexpectedShape {
+                endpoint: "POST /v3/printjobs",
+                message: "wrong shape".into(),
+            },
+        ];
+        for error in promoted {
+            let described = error.to_string();
+            let promoted = promote_to_ambiguous(error);
+            assert!(promoted.is_ambiguous(), "{described}");
+        }
+
+        // Nothing was created: the variant comes back untouched.
+        let kept = [
+            Error::Rejected {
+                status: 400,
+                message: "Bad Request".into(),
+            },
+            Error::Unauthorized {
+                message: "Unauthorized.".into(),
+            },
+            Error::RateLimited { retry_after: None },
+            Error::Transport {
+                kind: TransportKind::Connect,
+                message: "dns".into(),
+            },
+        ];
+        for error in kept {
+            let expected = error.to_string();
+            let promoted = promote_to_ambiguous(error);
+            assert!(!promoted.is_ambiguous(), "{promoted:?}");
+            assert_eq!(promoted.to_string(), expected);
+        }
     }
 
     #[test]

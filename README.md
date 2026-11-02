@@ -134,6 +134,7 @@ the request exactly once and never retries it.
 | `Error::Transport { kind: Connect }` | nothing was written | safe to retry |
 | `Error::Transport { kind: Timeout \| Io }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
+| `Error::Json` / `MissingField` / `UnexpectedShape` on a **submit** (2xx body that does not decode) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Ambiguous` | the letter may already exist | list `print_jobs` and look for your `notice` |
 | `Error::Rejected` (4xx) | the body was refused | fix the input |
 

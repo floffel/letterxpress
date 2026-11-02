@@ -101,7 +101,7 @@ impl std::fmt::Display for TransportKind {
 /// | [`Error::Upstream`] | no (see below) | no |
 /// | [`Error::Ambiguous`] | **no** — reconcile first | yes |
 /// | [`Error::Transport`] | per [`TransportKind`] | no |
-/// | [`Error::Json`] / [`Error::MissingField`] / [`Error::UnexpectedShape`] | no | no |
+/// | [`Error::Json`] / [`Error::MissingField`] / [`Error::UnexpectedShape`] | no | no on a read — on a **submit** it is [`Error::Ambiguous`] instead |
 /// | [`Error::TooLarge`] / [`Error::Base64`] | no | no |
 ///
 /// `Upstream` reports a 5xx *answer*, so the server is talking and the request
@@ -109,6 +109,12 @@ impl std::fmt::Display for TransportKind {
 /// arrive after the job was created, which is why the client turns a 5xx on a
 /// submit into [`Error::Ambiguous`] instead of `Upstream`. A caller that
 /// deliberately retries a failed read gets `Upstream` and decides for itself.
+///
+/// The same reasoning covers an answer that arrives but cannot be read: a
+/// submit whose `2xx` body is not JSON, carries no `data` or decodes to the
+/// wrong shape comes back as [`Error::Ambiguous`] too, because the provider
+/// already accepted the job. Only a `4xx` rejection proves that nothing was
+/// created, and only there does the decoding-error stance below apply.
 ///
 /// ```
 /// use letterxpress::Error;
@@ -197,11 +203,12 @@ pub enum Error {
     /// The request may have been processed, but no usable answer arrived.
     ///
     /// This is only produced for non-idempotent calls (job submission) after a
-    /// timeout, a mid-flight connection failure or a 5xx. **Do not resubmit
-    /// blindly**: the letter may already be in production. Look the job up
-    /// first — via [`Client::print_jobs`](crate::Client::print_jobs) with the
-    /// `notice` you set on the letter, or via the returned tracking data — and
-    /// only submit again if it is absent.
+    /// timeout, a mid-flight connection failure, a 5xx, or a `2xx` whose body
+    /// did not decode (not JSON, no `data`, unexpected shape). **Do not
+    /// resubmit blindly**: the letter may already be in production. Look the
+    /// job up first — via [`Client::print_jobs`](crate::Client::print_jobs) with
+    /// the `notice` you set on the letter, or via the returned tracking data —
+    /// and only submit again if it is absent.
     #[error("request may have been processed: {message}")]
     Ambiguous {
         /// What was observed, for logs and for the reconciliation decision.
