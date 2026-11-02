@@ -382,6 +382,101 @@ async fn a_submit_5xx_is_ambiguous_but_a_read_5xx_is_not() {
 }
 
 #[tokio::test]
+async fn a_submit_200_with_an_undecodable_body_is_ambiguous() {
+    // Just inside: the documented success body decodes.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"id":6035143,"status":"queue","items":[]}}"#,
+    );
+    let job = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect("documented answer");
+    assert_eq!(job.id.as_str(), "6035143");
+
+    // Just outside: the same 2xx, but nothing the client can read. The provider
+    // accepted (and billed) the letter in every one of these cases, so a
+    // terminal error would invite the caller to send it a second time.
+    for body in [
+        r#"{"status":200,"data":{"id":"6035143","status":"queue","items":"not a list"}}"#,
+        r#"{"status":200,"data":"not a job"}"#,
+        r#"{"status":200,"message":"OK"}"#,
+        "",
+        r#"{"status":200,"data":{"id":6035143"#,
+    ] {
+        let client = client_for(200, body);
+        let error = client
+            .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+            .await
+            .expect_err("must fail");
+        assert!(error.is_ambiguous(), "{body:?} produced {error:?}");
+        assert!(!error.is_retryable(), "{body:?} produced {error:?}");
+        assert_eq!(error.status(), None, "{body:?} was answered with a 2xx");
+    }
+}
+
+#[tokio::test]
+async fn a_read_200_with_an_undecodable_body_stays_terminal() {
+    // The same bodies on an idempotent endpoint: nothing was created, so the
+    // error stays a shape error and a retry is the caller's decision.
+    for body in [
+        r#"{"status":200,"data":{"id":"6035143","items":"not a list"}}"#,
+        r#"{"status":200,"message":"OK"}"#,
+        "",
+    ] {
+        let client = client_for(200, body);
+        let error = client
+            .print_job(&JobId::new("6035143").expect("id"))
+            .await
+            .expect_err("must fail");
+        assert!(!error.is_ambiguous(), "{body:?} produced {error:?}");
+        assert!(
+            matches!(
+                error,
+                Error::UnexpectedShape { .. } | Error::MissingField { .. }
+            ),
+            "{body:?} produced {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_email_submit_200_with_an_undecodable_body_is_ambiguous() {
+    let letter = || {
+        Letter::new(&pdf())
+            .expect("letter")
+            .with_email(
+                EmailDelivery::new("kunde@example.de", EmailOption::MailSecure).expect("delivery"),
+            )
+            .expect("email")
+    };
+
+    // Just inside: the documented single-job body.
+    let client = client_for(200, r#"{"status":200,"data":{"id":3096,"status":"queue"}}"#);
+    assert!(matches!(
+        client.submit_email_job(&letter()).await,
+        Ok(letterxpress::EmailJobSubmission::Single(_))
+    ));
+
+    // Just outside: bodies that parse as JSON but are neither of the three
+    // documented shapes, and one with no `data` at all. The job exists.
+    for body in [
+        r#"{"status":200,"data":{"nothing":true}}"#,
+        r#"{"status":200,"message":"OK"}"#,
+        r#"{"status":200,"data":[{"id":"not a number"}]}"#,
+        r#"{"status":200,"data":[{"id":1}"#,
+    ] {
+        let client = client_for(200, body);
+        let error = client
+            .submit_email_job(&letter())
+            .await
+            .expect_err("must fail");
+        assert!(error.is_ambiguous(), "{body:?} produced {error:?}");
+        assert!(!error.is_retryable(), "{body:?} produced {error:?}");
+    }
+}
+
+#[tokio::test]
 async fn an_exhausted_mock_is_a_protocol_error_not_a_panic() {
     let client = Client::new(
         MockTransport::default(),
@@ -809,7 +904,9 @@ async fn a_successful_reply_with_an_empty_data_object_is_not_an_error() {
 }
 
 #[tokio::test]
-async fn email_job_submission_rejects_an_unknown_shape() {
+async fn email_job_submission_with_an_unknown_shape_is_ambiguous() {
+    // The provider answered 2xx, so the job exists; a shape error here would be
+    // terminal and invite a second, billed submission.
     let client = client_for(200, r#"{"status":200,"data":{"nothing":"here"}}"#);
     let letter = Letter::new(&pdf())
         .expect("letter")
@@ -819,11 +916,7 @@ async fn email_job_submission_rejects_an_unknown_shape() {
         .submit_email_job(&letter)
         .await
         .expect_err("must fail");
-    assert!(matches!(
-        error,
-        Error::UnexpectedShape {
-            endpoint: "POST /v3/emailjobs",
-            ..
-        }
-    ));
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("POST /v3/emailjobs"), "{error}");
 }

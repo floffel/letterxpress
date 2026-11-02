@@ -110,6 +110,11 @@ impl std::fmt::Display for TransportKind {
 /// submit into [`Error::Ambiguous`] instead of `Upstream`. A caller that
 /// deliberately retries a failed read gets `Upstream` and decides for itself.
 ///
+/// The same holds for the decode variants: a 2xx on a submit means the job was
+/// accepted and billed, so `Json`, `MissingField` and `UnexpectedShape` there
+/// are reported as [`Error::Ambiguous`] too. `is_ambiguous()` is only ever true
+/// for `Ambiguous`, and a terminal error never hides a possible duplicate.
+///
 /// ```
 /// use letterxpress::Error;
 ///
@@ -197,8 +202,10 @@ pub enum Error {
     /// The request may have been processed, but no usable answer arrived.
     ///
     /// This is only produced for non-idempotent calls (job submission) after a
-    /// timeout, a mid-flight connection failure or a 5xx. **Do not resubmit
-    /// blindly**: the letter may already be in production. Look the job up
+    /// timeout, a mid-flight connection failure, a 5xx, or a 2xx whose body
+    /// could not be decoded — a 200 means the job exists and is billed even
+    /// when its tracking data is unreadable. **Do not resubmit blindly**: the
+    /// letter may already be in production. Look the job up
     /// first — via [`Client::print_jobs`](crate::Client::print_jobs) with the
     /// `notice` you set on the letter, or via the returned tracking data — and
     /// only submit again if it is absent.
@@ -218,6 +225,9 @@ pub enum Error {
     },
 
     /// A response body was not valid JSON.
+    ///
+    /// On a submit (a `POST`) a 2xx with an unreadable body is reported as
+    /// [`Error::Ambiguous`] instead, because the job may exist.
     #[error("invalid JSON in response: {source}")]
     Json {
         /// The underlying `serde_json` error, with line and column.
@@ -226,6 +236,8 @@ pub enum Error {
     },
 
     /// A successful response was missing a field the client needs.
+    ///
+    /// On a submit (a `POST`) this is reported as [`Error::Ambiguous`] instead.
     #[error("response for `{endpoint}` is missing `{field}`")]
     MissingField {
         /// The endpoint that was called, for example `GET /v3/printjobs/{id}`.
@@ -235,6 +247,8 @@ pub enum Error {
     },
 
     /// A response parsed as JSON but did not have the documented shape.
+    ///
+    /// On a submit (a `POST`) this is reported as [`Error::Ambiguous`] instead.
     #[error("response for `{endpoint}` has an unexpected shape: {message}")]
     UnexpectedShape {
         /// The endpoint that was called.

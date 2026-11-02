@@ -4,8 +4,9 @@
 //! Every method builds the documented body (including the `auth` object, which
 //! even `GET` and `DELETE` carry), sends it once, and decodes the envelope. No
 //! method retries: a submit that may have been processed returns
-//! [`Error::Ambiguous`](crate::Error::Ambiguous) instead, so a caller cannot
-//! double-send a letter by accident.
+//! [`Error::Ambiguous`](crate::Error::Ambiguous) instead — after a timeout, a
+//! 5xx, or a 2xx whose body does not decode — so a caller cannot double-send a
+//! letter by accident.
 //!
 //! ```no_run
 //! # #[cfg(feature = "http")]
@@ -995,7 +996,7 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Post, "/printjobs", None, Some(body))
             .await?;
-        decode_data("POST /v3/printjobs", envelope)
+        decode_submitted("POST /v3/printjobs", envelope)
     }
 
     /// `PUT /v3/printjobs/{id}` — change options within 15 minutes.
@@ -1092,10 +1093,17 @@ impl<T: Transport> Client<T> {
         let envelope = self
             .call(Method::Post, "/emailjobs", None, Some(body))
             .await?;
-        let data = envelope.require_data("POST /v3/emailjobs")?;
-        EmailJobSubmission::parse(data).map_err(|error| Error::UnexpectedShape {
-            endpoint: "POST /v3/emailjobs",
-            message: error.to_string(),
+        // The job is created and billed before the body is decoded, so an
+        // unreadable answer is an unknown outcome, not a shape error.
+        let endpoint = "POST /v3/emailjobs";
+        let data = envelope
+            .require_data(endpoint)
+            .map_err(promote_to_ambiguous)?;
+        EmailJobSubmission::parse(data).map_err(|error| {
+            promote_to_ambiguous(Error::UnexpectedShape {
+                endpoint,
+                message: error.to_string(),
+            })
         })
     }
 
@@ -1423,12 +1431,24 @@ fn classify_transport(error: Error, method: Method) -> Error {
     }
 }
 
-/// A 5xx on a submit is ambiguous too: the job may exist even though the call
-/// failed.
+/// A failed submit is ambiguous even when the failure is on our side: a 5xx,
+/// or a 2xx whose body does not decode, leaves the job possibly created and
+/// billed. Definitive answers (4xx, auth, rate limit) stay terminal.
 fn promote_to_ambiguous(error: Error) -> Error {
     match error {
         Error::Upstream { status, message } => Error::Ambiguous {
             message: format!("provider answered http {status} after the submit: {message}"),
+        },
+        Error::Json { source } => Error::Ambiguous {
+            message: format!("provider answered 2xx with a body that is not JSON: {source}"),
+        },
+        Error::MissingField { field, .. } => Error::Ambiguous {
+            message: format!("provider answered 2xx without `{field}`: the job may exist"),
+        },
+        Error::UnexpectedShape { endpoint, message } => Error::Ambiguous {
+            message: format!(
+                "provider answered 2xx for `{endpoint}` with an undecodable body: {message}"
+            ),
         },
         other => other,
     }
@@ -1441,6 +1461,16 @@ fn decode_data<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) 
         endpoint,
         message: error.to_string(),
     })
+}
+
+/// Decodes `data` for a submit that has already reached the provider.
+///
+/// The provider only answers 2xx here, and it creates the job before writing
+/// the body: a body that does not decode — truncated by a proxy, missing
+/// `data`, or a shape the client does not know — leaves the outcome unknown, so
+/// it is promoted to [`Error::Ambiguous`] instead of a terminal shape error.
+fn decode_submitted<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) -> Result<D> {
+    decode_data(endpoint, envelope).map_err(promote_to_ambiguous)
 }
 
 #[cfg(test)]

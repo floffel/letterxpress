@@ -155,7 +155,7 @@ fn request_side_filters_are_closed_and_parseable() {
 
 #[test]
 fn money_supports_every_documented_shape() {
-    assert_eq!(Money::ZERO.euros(), 0.0);
+    assert!(Money::ZERO.euros().abs() < f64::EPSILON);
     assert!(Money::ZERO.is_zero());
     assert!(!Money::from_cents(1).is_zero());
     assert_eq!(Money::from(1.5), Money::from_euros(1.5));
