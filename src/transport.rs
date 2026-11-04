@@ -659,7 +659,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
 /// use letterxpress::{Client, Credentials, Mode, ReqwestTransport};
 ///
 /// let client = Client::new(
-///     ReqwestTransport::new(),
+///     ReqwestTransport::new()?,
 ///     Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
 /// );
 /// println!("balance: {} EUR", client.balance().await?.balance);
@@ -679,16 +679,15 @@ impl ReqwestTransport {
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
-    /// let transport = letterxpress::ReqwestTransport::new();
+    /// # fn demo() -> letterxpress::Result<()> {
+    /// let transport = letterxpress::ReqwestTransport::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-        }
+    pub fn new() -> Result<Self> {
+        let client =
+            build_reqwest_client(reqwest::Client::builder()).map_err(describe_reqwest_error)?;
+        Ok(Self { client })
     }
 
     /// Reuses an existing `reqwest::Client` (for connection pooling with the
@@ -715,6 +714,13 @@ impl Transport for ReqwestTransport {
         };
         if let Some(timeout) = request.timeout {
             builder = builder.timeout(timeout);
+        }
+
+        #[cfg(feature = "http")]
+        fn build_reqwest_client(
+            builder: reqwest::ClientBuilder,
+        ) -> std::result::Result<reqwest::Client, reqwest::Error> {
+            builder.redirect(reqwest::redirect::Policy::none()).build()
         }
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
@@ -815,5 +821,27 @@ mod tests {
         );
         let debug = format!("{request:?}");
         assert!(!debug.contains("secret"));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_new_builds_client() {
+        assert!(ReqwestTransport::new().is_ok());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_builder_failure_is_protocol_error() {
+        let error = build_reqwest_client(reqwest::Client::builder().user_agent("bad\nagent"))
+            .map(ReqwestTransport::with_client)
+            .map_err(|error| describe_reqwest_error(&error))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Transport {
+                kind: TransportKind::Protocol,
+                ..
+            }
+        ));
     }
 }
