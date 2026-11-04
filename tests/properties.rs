@@ -195,6 +195,61 @@ proptest! {
         prop_assert_eq!(json["c4"].as_u64(), Some(u64::from(u8::from(c4))));
     }
 
+    /// The registered/shipping rule is enforced from both sides: for every
+    /// class and both call orders, the pair is accepted exactly when the class
+    /// is not international, and an accepted letter never emits the pair the
+    /// provider documents as impossible.
+    #[test]
+    fn registered_mail_never_meets_international_shipping(
+        registered_index in 0usize..2,
+        shipping_index in 0usize..4,
+        registered_first in any::<bool>(),
+    ) {
+        let registered = if registered_index == 0 {
+            Registered::EinschreibenEinwurf
+        } else {
+            Registered::Einschreiben
+        };
+        let shipping = match shipping_index {
+            0 => Shipping::National,
+            1 => Shipping::International,
+            2 => Shipping::Auto,
+            // The carry-all spells the same wire value and must be caught too.
+            _ => Shipping::Other("International".into()),
+        };
+        let impossible = matches!(shipping_index, 1 | 3);
+
+        let letter = Letter::new(b"%PDF-1.4\n").expect("valid pdf");
+        let built = if registered_first {
+            letter
+                .with_registered(registered.clone())
+                .and_then(|letter| letter.with_shipping(shipping.clone()))
+        } else {
+            letter
+                .with_shipping(shipping.clone())
+                .and_then(|letter| letter.with_registered(registered))
+        };
+        prop_assert_eq!(built.is_ok(), !impossible);
+        if let Ok(letter) = built {
+            let json = letter.to_json();
+            prop_assert!(json.get("registered").is_some());
+            prop_assert!(!json["specification"]["shipping"]
+                .as_str()
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("international"));
+        }
+
+        // A price quote carries the same pair, so the same rule applies.
+        let quote = letterxpress::PriceRequest::new(1)
+            .expect("price")
+            .with_registered(Registered::Einschreiben)
+            .and_then(|request| request.with_shipping(shipping));
+        prop_assert_eq!(quote.is_ok(), !impossible);
+        if let Ok(quote) = quote {
+            prop_assert!(quote.to_json().get("registered").is_some());
+        }
+    }
+
     /// Email addresses that pass validation are accepted by the builder, and an
     /// invalid one never reaches the wire.
     #[test]

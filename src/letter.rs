@@ -3,8 +3,13 @@
 //! Everything the provider constrains is checked here — PDF size and magic,
 //! the documented 255-character `notice`, the per-field bank-form limits, the
 //! national-only registered-mail rule, dispatch dates in the future, and the
-//! fact that `email_letter` and `serial_letter` cannot be combined. A violation
-//! is a local [`Error::Validation`], never a 400 that still cost a request.
+//! fact that `email_letter` and `serial_letter` cannot be combined.
+//!
+//! Rules that span two fields are enforced from **both** sides: whichever
+//! setter runs second is the one that fails, so no order of calls can put
+//! `registered` and `shipping: "international"` on the wire together. A
+//! violation is a local [`Error::Validation`], never a 400 that still cost a
+//! request (and up to 50 MB of upload).
 //!
 //! ```
 //! use letterxpress::{Color, Letter, PrintMode, Shipping};
@@ -12,7 +17,7 @@
 //! let letter = Letter::new(b"%PDF-1.4\n%fake-but-shaped-like-a-pdf\n")?
 //!     .with_color(Color::BlackAndWhite)
 //!     .with_print_mode(PrintMode::Duplex)
-//!     .with_shipping(Shipping::National)
+//!     .with_shipping(Shipping::National)?
 //!     .with_notice("invoice-4711")?;
 //!
 //! let body = letter.to_json();
@@ -778,14 +783,17 @@ impl BankForm {
 /// `POST /v3/emailjobs`.
 ///
 /// The PDF carries the recipient address; the API has no address field. Every
-/// setter validates, and the size budget (50 MB in total across the letter, its
-/// attachments and its backgrounds) is enforced before anything is encoded.
+/// setter validates — including the cross-field rule that registered mail is
+/// national only, which [`Letter::with_registered`], [`Letter::with_shipping`]
+/// and [`Letter::with_specification`] all enforce — and the size budget (50 MB
+/// in total across the letter, its attachments and its backgrounds) is enforced
+/// before anything is encoded.
 ///
 /// ```
 /// use letterxpress::{Color, Letter, Shipping};
 ///
 /// let letter = Letter::new(b"%PDF-1.4\n...")?
-///     .with_shipping(Shipping::National)
+///     .with_shipping(Shipping::National)?
 ///     .with_color(Color::Color)
 ///     .with_filename_original("Rechnung-123456.pdf")?
 ///     .with_attachment(b"%PDF-1.4\nattachment\n")?;
@@ -852,18 +860,32 @@ impl Letter {
 
     /// Replaces the whole specification.
     ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the letter is already registered and the new
+    /// specification ships internationally — registered mail is national only.
+    ///
     /// ```
-    /// use letterxpress::{Color, Letter, Specification};
+    /// use letterxpress::{Color, Letter, Registered, Shipping, Specification};
     ///
     /// let spec = Specification::new().with_color(Color::Color);
-    /// let letter = Letter::new(b"%PDF-1.4\n")?.with_specification(spec);
+    /// let letter = Letter::new(b"%PDF-1.4\n")?.with_specification(spec)?;
     /// assert_eq!(letter.specification().color(), Color::Color);
+    ///
+    /// // Replacing the specification cannot lift the registered-mail rule.
+    /// let registered = Letter::new(b"%PDF-1.4\n")?.with_registered(Registered::Einschreiben)?;
+    /// let international = Specification::new().with_shipping(Shipping::International);
+    /// assert!(registered.with_specification(international).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_specification(mut self, specification: Specification) -> Self {
+    pub fn with_specification(mut self, specification: Specification) -> Result<Self, Error> {
+        check_registered_shipping(
+            "letter.specification.shipping",
+            self.registered.as_ref(),
+            &specification.shipping(),
+        )?;
         self.specification = specification;
-        self
+        Ok(self)
     }
 
     /// Sets the colour.
@@ -897,16 +919,36 @@ impl Letter {
 
     /// Sets the shipping class.
     ///
-    /// ```
-    /// use letterxpress::{Letter, Shipping};
+    /// # Errors
     ///
-    /// assert_eq!(Letter::new(b"%PDF-1.4\n")?.with_shipping(Shipping::International).specification().shipping(), Shipping::International);
+    /// [`Error::Validation`] when the letter is already registered and
+    /// `shipping` is international. The rule is checked from both sides, so it
+    /// does not matter whether the registration or the class is set first.
+    ///
+    /// ```
+    /// use letterxpress::{Letter, Registered, Shipping};
+    ///
+    /// // National is the class registered mail requires — and `Auto` stays
+    /// // allowed, because the provider still decides domestically.
+    /// let letter = Letter::new(b"%PDF-1.4\n")?
+    ///     .with_shipping(Shipping::National)?
+    ///     .with_registered(Registered::EinschreibenEinwurf)?;
+    /// assert_eq!(letter.to_json()["specification"]["shipping"], "national");
+    ///
+    /// // One class further, in the opposite order, is a local error instead of
+    /// // a 400 that still cost the upload.
+    /// let registered = Letter::new(b"%PDF-1.4\n")?.with_registered(Registered::Einschreiben)?;
+    /// assert!(registered.with_shipping(Shipping::International).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_shipping(mut self, shipping: Shipping) -> Self {
+    pub fn with_shipping(mut self, shipping: Shipping) -> Result<Self, Error> {
+        check_registered_shipping(
+            "letter.specification.shipping",
+            self.registered.as_ref(),
+            &shipping,
+        )?;
         self.specification = self.specification.with_shipping(shipping);
-        self
+        Ok(self)
     }
 
     /// Requests a C4 envelope.
@@ -964,25 +1006,26 @@ impl Letter {
     ///
     /// [`Error::Validation`] when the letter ships internationally — the
     /// provider documents registered mail as national only, and silently
-    /// sending it unregistered is not an option.
+    /// sending it unregistered is not an option. The rule is checked from both
+    /// sides: registering here or moving to international shipping later fail
+    /// the same way.
     ///
     /// ```
     /// use letterxpress::{Letter, Registered, Shipping};
     ///
-    /// let national = Letter::new(b"%PDF-1.4\n")?.with_shipping(Shipping::National);
+    /// let national = Letter::new(b"%PDF-1.4\n")?.with_shipping(Shipping::National)?;
     /// assert!(national.with_registered(Registered::EinschreibenEinwurf).is_ok());
     ///
-    /// let international = Letter::new(b"%PDF-1.4\n")?.with_shipping(Shipping::International);
+    /// let international = Letter::new(b"%PDF-1.4\n")?.with_shipping(Shipping::International)?;
     /// assert!(international.with_registered(Registered::Einschreiben).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self, Error> {
-        if self.specification.shipping() == Shipping::International {
-            return Err(Error::invalid(
-                "letter.registered",
-                "registered mail is national only; use Shipping::National",
-            ));
-        }
+        check_registered_shipping(
+            "letter.registered",
+            Some(&registered),
+            &self.specification.shipping(),
+        )?;
         self.registered = Some(registered);
         Ok(self)
     }
@@ -1362,13 +1405,16 @@ impl Letter {
 
 /// A price query (`GET /v3/price`), which needs `specification.pages`.
 ///
+/// The registered-mail rule is enforced from both sides here too: quote a
+/// national letter when you ask for the registered surcharge.
+///
 /// ```
 /// use letterxpress::{Color, PriceRequest, PrintMode, Shipping};
 ///
 /// let request = PriceRequest::new(3)?
 ///     .with_color(Color::Color)
 ///     .with_print_mode(PrintMode::Duplex)
-///     .with_shipping(Shipping::National);
+///     .with_shipping(Shipping::National)?;
 ///
 /// assert_eq!(request.to_json()["specification"]["pages"], 3);
 /// assert_eq!(request.to_json()["specification"]["color"], "4");
@@ -1447,16 +1493,32 @@ impl PriceRequest {
 
     /// Sets the shipping class.
     ///
-    /// ```
-    /// use letterxpress::{PriceRequest, Shipping};
+    /// # Errors
     ///
-    /// assert_eq!(PriceRequest::new(1)?.with_shipping(Shipping::National).shipping(), Shipping::National);
+    /// [`Error::Validation`] when the quote is already registered and
+    /// `shipping` is international — the provider prices no such combination.
+    ///
+    /// ```
+    /// use letterxpress::{PriceRequest, Registered, Shipping};
+    ///
+    /// let national = PriceRequest::new(1)?
+    ///     .with_shipping(Shipping::National)?
+    ///     .with_registered(Registered::Einschreiben)?;
+    /// assert_eq!(national.shipping(), Shipping::National);
+    ///
+    /// // The opposite order fails just the same.
+    /// let registered = PriceRequest::new(1)?.with_registered(Registered::Einschreiben)?;
+    /// assert!(registered.with_shipping(Shipping::International).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_shipping(mut self, shipping: Shipping) -> Self {
+    pub fn with_shipping(mut self, shipping: Shipping) -> Result<Self, Error> {
+        check_registered_shipping(
+            "price.specification.shipping",
+            self.registered.as_ref(),
+            &shipping,
+        )?;
         self.specification = self.specification.with_shipping(shipping);
-        self
+        Ok(self)
     }
 
     /// Requests a C4 envelope price.
@@ -1479,25 +1541,24 @@ impl PriceRequest {
     /// # Errors
     ///
     /// [`Error::Validation`] for international shipping — registered mail is
-    /// national only.
+    /// national only. Checked from both sides, like on [`Letter`].
     ///
     /// ```
     /// use letterxpress::{PriceRequest, Registered, Shipping};
     ///
-    /// let national = PriceRequest::new(1)?.with_shipping(Shipping::National);
+    /// let national = PriceRequest::new(1)?.with_shipping(Shipping::National)?;
     /// assert!(national.with_registered(Registered::Einschreiben).is_ok());
     ///
-    /// let international = PriceRequest::new(1)?.with_shipping(Shipping::International);
+    /// let international = PriceRequest::new(1)?.with_shipping(Shipping::International)?;
     /// assert!(international.with_registered(Registered::Einschreiben).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self, Error> {
-        if self.specification.shipping() == Shipping::International {
-            return Err(Error::invalid(
-                "price.registered",
-                "registered mail is national only; use Shipping::National",
-            ));
-        }
+        check_registered_shipping(
+            "price.registered",
+            Some(&registered),
+            &self.specification.shipping(),
+        )?;
         self.registered = Some(registered);
         Ok(self)
     }
@@ -1616,6 +1677,33 @@ fn check_chars(field: &'static str, value: &str, max: usize) -> Result<(), Error
     let len = value.chars().count();
     if len > max {
         return Err(Error::TooLarge { field, len, max });
+    }
+    Ok(())
+}
+
+/// The rule the provider documents across two fields: `registered` is national
+/// only.
+///
+/// Every setter that can touch either side of the pair calls this — the one
+/// that adds the registration and the ones that change the shipping class — so
+/// the outcome does not depend on the order of calls, and [`Letter::to_json`]
+/// and [`PriceRequest::to_json`] can never emit `registered` together with
+/// `shipping: "international"`. `field` names the argument the caller just
+/// tried to set, so the error points at what it passed in.
+///
+/// The comparison uses the wire spelling rather than `==` on the enum: a
+/// carry-all `Shipping::Other("international")` goes on the wire as
+/// `"international"` and is just as impossible as the named variant.
+pub(crate) fn check_registered_shipping(
+    field: &'static str,
+    registered: Option<&Registered>,
+    shipping: &Shipping,
+) -> Result<(), Error> {
+    if registered.is_some() && shipping.as_str().eq_ignore_ascii_case("international") {
+        return Err(Error::invalid(
+            field,
+            "registered mail is national only; use Shipping::National",
+        ));
     }
     Ok(())
 }

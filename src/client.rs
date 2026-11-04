@@ -36,8 +36,8 @@ use crate::transport::{Method, Request, Transport};
 use crate::{
     Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage, EmailJobSubmission,
     InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal, JournalType, Letter, Mode,
-    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Shipping, Specification,
-    TransactionFilter, TransactionPage, TransportKind,
+    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Specification, TransactionFilter,
+    TransactionPage, TransportKind,
 };
 use crate::{Error, Result};
 
@@ -739,12 +739,11 @@ impl PrintJobUpdate {
     /// assert!(PrintJobUpdate::new(international).with_registered(Registered::Einschreiben).is_err());
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self> {
-        if self.specification.shipping() == Shipping::International {
-            return Err(Error::invalid(
-                "letter.registered",
-                "registered mail is national only",
-            ));
-        }
+        crate::letter::check_registered_shipping(
+            "letter.registered",
+            Some(&registered),
+            &self.specification.shipping(),
+        )?;
         self.registered = Some(registered);
         Ok(self)
     }
