@@ -37,7 +37,7 @@ use letterxpress::{Client, Credentials, Letter, Mode, PriceRequest, Registered, 
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `Mode::Test` files jobs in the Postbox: nothing is printed, nothing is billed.
     let client = Client::new(
-        letterxpress::ReqwestTransport::new(),
+        letterxpress::ReqwestTransport::new()?,
         Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
     );
 
