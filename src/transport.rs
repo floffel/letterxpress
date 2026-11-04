@@ -734,16 +734,7 @@ impl Transport for ReqwestTransport {
             .await
             .map_err(|error| describe_reqwest_error(&error))?;
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let headers = collect_response_headers(response.headers());
         let body = response
             .bytes()
             .await
@@ -761,6 +752,19 @@ fn build_reqwest_client(
     builder: reqwest::ClientBuilder,
 ) -> std::result::Result<reqwest::Client, reqwest::Error> {
     builder.redirect(reqwest::redirect::Policy::none()).build()
+}
+
+#[cfg(feature = "http")]
+fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|text| (name.as_str().to_string(), text.to_string()))
+        })
+        .collect()
 }
 
 /// Maps a `reqwest` failure to a typed transport error without echoing the
@@ -847,6 +851,21 @@ mod tests {
 
     #[cfg(feature = "http")]
     #[test]
+    fn non_utf8_response_headers_are_dropped_not_emptied() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_bytes(b"\xFF").expect("header value"),
+        );
+        headers.insert("x-rate", reqwest::header::HeaderValue::from_static("9"));
+
+        let response = Response::new(429, collect_response_headers(&headers), Vec::new());
+        assert_eq!(response.header("retry-after"), None);
+        assert_eq!(response.header("x-rate"), Some("9"));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
     fn reqwest_transport_new_fails_closed_on_a_broken_builder() {
         // No fallback client: the failure is reported, and it is terminal.
         let outcome = built_client(reqwest::Client::builder().user_agent("letterxpress\u{7f}"));
@@ -884,5 +903,15 @@ mod tests {
             ),
             "the first illegal header byte must fail closed, got {outside:?}"
         );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn utf8_empty_response_header_stays_present_and_empty() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", reqwest::header::HeaderValue::from_static(""));
+
+        let response = Response::new(429, collect_response_headers(&headers), Vec::new());
+        assert_eq!(response.header("retry-after"), Some(""));
     }
 }
