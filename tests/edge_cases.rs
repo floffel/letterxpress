@@ -686,15 +686,22 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
         .with_specification(international)
         .is_err());
 
-    // A carry-all spelling of the same wire value cannot slip past the rule.
+    // A carry-all spelling of the same wire value cannot slip past the rule,
+    // padded or not.
     let smuggled = Shipping::from_wire("International");
     assert!(matches!(smuggled, Shipping::International));
     assert!(registered
         .clone()
         .with_shipping(Shipping::Other("international".into()))
         .is_err());
+    assert!(registered
+        .clone()
+        .with_shipping(Shipping::Other("  international  ".into()))
+        .is_err());
+}
 
-    // PriceRequest has the identical rule on both sides.
+#[test]
+fn a_price_request_carries_the_same_pair_and_the_same_rule() {
     let international = letterxpress::PriceRequest::new(1)
         .expect("price")
         .with_shipping(Shipping::International)
@@ -715,6 +722,7 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
         .with_registered(Registered::Einschreiben)
         .expect("registered");
     let error = registered
+        .clone()
         .with_shipping(Shipping::International)
         .expect_err("must fail");
     assert!(matches!(
@@ -724,12 +732,10 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
             ..
         }
     ));
-    assert!(letterxpress::PriceRequest::new(1)
-        .expect("price")
-        .with_registered(Registered::Einschreiben)
-        .expect("registered")
-        .with_shipping(Shipping::National)
-        .is_ok());
+    assert!(registered.clone().with_shipping(Shipping::National).is_ok());
+    assert!(registered
+        .with_shipping(Shipping::Other("international".into()))
+        .is_err());
 }
 
 #[test]

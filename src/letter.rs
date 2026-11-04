@@ -7,9 +7,11 @@
 //!
 //! Rules that span two fields are enforced from **both** sides: whichever
 //! setter runs second is the one that fails, so no order of calls can put
-//! `registered` and `shipping: "international"` on the wire together. A
-//! violation is a local [`Error::Validation`], never a 400 that still cost a
-//! request (and up to 50 MB of upload).
+//! `registered` and `shipping: "international"` on the wire together. The
+//! client repeats that one cross-field check when it builds a request, so the
+//! pair is also refused at the point of use, before an upload. A violation is a
+//! local [`Error::Validation`], never a 400 that still cost a request (and up to
+//! 50 MB of upload).
 //!
 //! ```
 //! use letterxpress::{Color, Letter, PrintMode, Shipping};
@@ -136,6 +138,10 @@ impl Specification {
     }
 
     /// Sets the shipping class.
+    ///
+    /// A `Specification` on its own knows nothing about registered mail — that
+    /// pair is a [`Letter`] rule, enforced by [`Letter::with_shipping`],
+    /// [`Letter::with_specification`] and [`Letter::with_registered`].
     ///
     /// ```
     /// use letterxpress::{Shipping, Specification};
@@ -1247,7 +1253,28 @@ impl Letter {
         Ok(self)
     }
 
+    /// The last line of defence against the cross-field pair going out wrong:
+    /// registered mail is national only.
+    ///
+    /// Every setter that can change either side of the pair already rejects the
+    /// combination, so this check never fires for a value built through the
+    /// public API. It exists for the client boundary: a request is refused
+    /// locally — before the 50 MB upload — even if a future field or
+    /// constructor ever manages to assemble the pair without going through a
+    /// setter.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        check_registered_shipping(
+            "letter.registered",
+            self.registered.as_ref(),
+            &self.specification.shipping(),
+        )
+    }
+
     /// The wire shape: exactly the keys that are set, nothing more.
+    ///
+    /// `registered` and `shipping: "international"` are never emitted together:
+    /// the setters reject that pair from either side, and the client repeats the
+    /// check before it sends anything.
     ///
     /// ```
     /// use letterxpress::Letter;
@@ -1598,6 +1625,20 @@ impl PriceRequest {
         self.specification.shipping()
     }
 
+    /// The last line of defence for the price body: registered mail is national
+    /// only, so no quote is ever requested for the impossible pair.
+    ///
+    /// Like [`Letter`](crate::Letter), the setters already reject the
+    /// combination from both sides; this repeats the check at the client
+    /// boundary.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        check_registered_shipping(
+            "price.registered",
+            self.registered.as_ref(),
+            &self.specification.shipping(),
+        )
+    }
+
     /// The wire shape (`specification` with `pages`, plus optional keys).
     ///
     /// ```
@@ -1693,13 +1734,20 @@ fn check_chars(field: &'static str, value: &str, max: usize) -> Result<(), Error
 ///
 /// The comparison uses the wire spelling rather than `==` on the enum: a
 /// carry-all `Shipping::Other("international")` goes on the wire as
-/// `"international"` and is just as impossible as the named variant.
+/// `"international"` and is just as impossible as the named variant. The value
+/// is trimmed first, because a hand-built `Other` is not normalized by
+/// [`Shipping::from_wire`] and would otherwise reach the provider padded.
 pub(crate) fn check_registered_shipping(
     field: &'static str,
     registered: Option<&Registered>,
     shipping: &Shipping,
 ) -> Result<(), Error> {
-    if registered.is_some() && shipping.as_str().eq_ignore_ascii_case("international") {
+    if registered.is_some()
+        && shipping
+            .as_str()
+            .trim()
+            .eq_ignore_ascii_case("international")
+    {
         return Err(Error::invalid(
             field,
             "registered mail is national only; use Shipping::National",
@@ -1910,5 +1958,64 @@ mod tests {
             "900150983cd24fb0d6963f7d28e17f72",
             "MD5 of the base64 text, hex encoded"
         );
+    }
+
+    /// The builders cannot assemble the impossible pair, so the final pass is
+    /// exercised the only way it can fire: by writing the fields directly, as a
+    /// future constructor or field might. Each case names the boundary.
+    #[test]
+    fn the_final_pass_catches_the_pair_the_builder_cannot_build() {
+        let mut letter = Letter::new(&pdf()).expect("letter");
+        assert!(letter.validate().is_ok(), "no registration, no rule");
+
+        // Inside: national, and `Auto` (the provider still decides domestically).
+        letter.registered = Some(Registered::Einschreiben);
+        assert!(letter.validate().is_ok());
+        letter.specification = Specification::new().with_shipping(Shipping::National);
+        assert!(letter.validate().is_ok());
+        letter.specification = Specification::new().with_shipping(Shipping::Auto);
+        assert!(letter.validate().is_ok());
+
+        // Outside: international, by name and by the carry-all spelling of the
+        // same wire value.
+        for shipping in [
+            Shipping::International,
+            Shipping::Other("international".into()),
+            Shipping::Other("International".into()),
+            // A hand-built carry-all is not normalized, so the padding must not
+            // buy it a pass either.
+            Shipping::Other("  international  ".into()),
+        ] {
+            letter.specification = Specification::new().with_shipping(shipping.clone());
+            assert!(
+                matches!(
+                    letter.validate(),
+                    Err(Error::Validation {
+                        field: "letter.registered",
+                        ..
+                    })
+                ),
+                "{shipping:?} must be caught by the final pass"
+            );
+        }
+
+        // Without a registration the shipping class alone is never a violation.
+        letter.registered = None;
+        assert!(letter.validate().is_ok());
+
+        // The same pass guards the price body.
+        let mut request = PriceRequest::new(1).expect("price");
+        request.registered = Some(Registered::Einschreiben);
+        assert!(request.validate().is_ok());
+        request.specification = Specification::new().with_shipping(Shipping::International);
+        assert!(matches!(
+            request.validate(),
+            Err(Error::Validation {
+                field: "price.registered",
+                ..
+            })
+        ));
+        request.specification = Specification::new().with_shipping(Shipping::National);
+        assert!(request.validate().is_ok());
     }
 }
