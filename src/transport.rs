@@ -840,10 +840,7 @@ mod tests {
     #[test]
     fn utf8_empty_response_header_stays_present_and_empty() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "retry-after",
-            reqwest::header::HeaderValue::from_static(""),
-        );
+        headers.insert("retry-after", reqwest::header::HeaderValue::from_static(""));
 
         let response = Response::new(429, collect_response_headers(&headers), Vec::new());
         assert_eq!(response.header("retry-after"), Some(""));
