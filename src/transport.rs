@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
+use url::Url;
 
 use crate::{Error, Result, TransportKind};
 
@@ -557,19 +558,15 @@ impl RecordedRequest {
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
     /// let recorded = RecordedRequest { method: Method::Get, url: "https://api.letterxpress.de/v3/printjobs?filter=hold".to_string(), body: Vec::new(), headers: Vec::new() };
-    /// assert_eq!(recorded.path_and_query(), "/v3/printjobs?filter=hold");
+    /// assert_eq!(recorded.path_and_query().as_deref(), Some("/v3/printjobs?filter=hold"));
     /// ```
     #[must_use]
-    pub fn path_and_query(&self) -> &str {
-        match self.url.find("://") {
-            Some(scheme_end) => {
-                let after_scheme = &self.url[scheme_end + 3..];
-                match after_scheme.find('/') {
-                    Some(path_start) => &after_scheme[path_start..],
-                    None => "/",
-                }
-            }
-            None => self.url.as_str(),
+    pub fn path_and_query(&self) -> Option<String> {
+        let parsed = Url::parse(&self.url).ok()?;
+        let path = parsed.path();
+        match parsed.query() {
+            Some(query) => Some(format!("{path}?{query}")),
+            None => Some(path.to_owned()),
         }
     }
 }
