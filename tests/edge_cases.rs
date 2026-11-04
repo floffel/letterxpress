@@ -871,8 +871,8 @@ fn money_helpers_are_stable_at_the_boundaries() {
     assert_eq!(Money::from_euros(f64::NAN).cents(), 0, "no panic on NaN");
     assert_eq!(
         Money::from_euros(f64::INFINITY).cents(),
-        i64::MAX,
-        "saturating"
+        0,
+        "fails closed"
     );
     assert_eq!(
         Money::from_euros(0.005).cents(),

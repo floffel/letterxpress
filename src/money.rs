@@ -44,8 +44,8 @@ impl Money {
 
     /// Wraps a euro value.
     ///
-    /// Non-finite input is not rejected here (the provider never sends it);
-    /// [`Money::cents`] saturates instead of panicking.
+    /// Input is not validated here; deserialisation rejects non-finite and
+    /// out-of-range values.
     ///
     /// ```
     /// use letterxpress::Money;
@@ -91,11 +91,13 @@ impl Money {
     /// assert_eq!(Money::from_euros(-0.675).cents(), -68);
     /// ```
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn cents(self) -> i64 {
-        // `as i64` saturates for NaN/infinity, so this cannot panic even on a
-        // hostile response.
-        (self.euros * 100.0).round() as i64
+        // Fail closed if the internal amount is non-finite or outside the
+        // representable cents range.
+        match Self::checked_rounded_cents(self.euros) {
+            Some(cents) => cents,
+            None => 0,
+        }
     }
 
     /// Net plus tax.
@@ -121,6 +123,15 @@ impl Money {
     #[must_use]
     pub fn is_zero(self) -> bool {
         self.euros == 0.0
+    }
+
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn checked_rounded_cents(euros: f64) -> Option<i64> {
+        let cents = (euros * 100.0).round();
+        if !cents.is_finite() || cents < i64::MIN as f64 || cents > i64::MAX as f64 {
+            return None;
+        }
+        Some(cents as i64)
     }
 }
 
@@ -154,6 +165,9 @@ impl From<f64> for Money {
 
 impl Serialize for Money {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if !self.euros.is_finite() {
+            return Err(serde::ser::Error::custom("money amount must be finite"));
+        }
         serializer.serialize_f64(self.euros)
     }
 }
@@ -168,17 +182,17 @@ impl Visitor<'_> for MoneyVisitor {
     }
 
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-        Ok(Money::from_euros(value))
+        parse_money(value)
     }
 
     #[allow(clippy::cast_precision_loss)]
     fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(Money::from_euros(value as f64))
+        parse_money(value as f64)
     }
 
     #[allow(clippy::cast_precision_loss)]
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(Money::from_euros(value as f64))
+        parse_money(value as f64)
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -188,8 +202,8 @@ impl Visitor<'_> for MoneyVisitor {
         let cleaned = value.trim().replace(',', ".");
         cleaned
             .parse::<f64>()
-            .map(Money::from_euros)
             .map_err(|_| E::custom(format!("not a euro amount: {value:?}")))
+            .and_then(parse_money)
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -204,6 +218,17 @@ impl Visitor<'_> for MoneyVisitor {
 impl<'de> Deserialize<'de> for Money {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_any(MoneyVisitor)
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn parse_money<E: de::Error>(value: f64) -> Result<Money, E> {
+        if !value.is_finite() {
+            return Err(E::custom(format!("euro amount must be finite: {value:?}")));
+        }
+        if Money::checked_rounded_cents(value).is_none() {
+            return Err(E::custom(format!("euro amount out of range: {value:?}")));
+        }
+        Ok(Money::from_euros(value))
     }
 }
 
@@ -249,5 +274,19 @@ mod tests {
             MoneyVisitor.visit_none::<serde_json::Error>().unwrap(),
             Money::ZERO
         );
+    }
+
+    #[test]
+    fn the_money_visitor_rejects_non_finite_or_out_of_range_values() {
+        for value in ["inf", "-inf", "NaN", "1e400", "1e20"] {
+            assert!(MoneyVisitor.visit_str::<serde_json::Error>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn serializing_non_finite_money_fails() {
+        assert!(serde_json::to_string(&Money::from_euros(f64::NAN)).is_err());
+        assert!(serde_json::to_string(&Money::from_euros(f64::INFINITY)).is_err());
+        assert!(serde_json::to_string(&Money::from_euros(f64::NEG_INFINITY)).is_err());
     }
 }
