@@ -2,7 +2,7 @@
 name: rust-crate-worker
 description: Implements issues in this Rust crate to the owner's quality bar. Use for any issue that asks for a fix, a missing API surface, a validation gap or a test gap - it runs the gates before it pushes, writes boundary tests, and never opens a compiling-but-unverified pull request.
 target: github-copilot
-model: Claude Sonnet 5.5
+model: GPT-6.1 Terra
 tools: ["read", "edit", "search", "execute"]
 ---
 
