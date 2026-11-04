@@ -512,28 +512,64 @@ impl Transport for MockTransport {
 /// ```
 /// use letterxpress::transport::Method;
 ///
-/// let recorded = letterxpress::transport::RecordedRequest {
-///     method: Method::Post,
-///     url: "https://example.test/v3/printjobs".to_string(),
-///     body: br#"{"auth":{}}"#.to_vec(),
-///     headers: Vec::new(),
-/// };
+/// let recorded = letterxpress::transport::RecordedRequest::new(
+///     Method::Post,
+///     "https://example.test/v3/printjobs",
+///     br#"{"auth":{}}"#.to_vec(),
+///     Vec::new(),
+/// );
 /// assert_eq!(recorded.json()?["auth"], serde_json::json!({}));
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecordedRequest {
     /// Verb that was used.
     pub method: Method,
     /// Full URL, including query string.
     pub url: String,
     /// Body bytes exactly as handed to the transport.
-    pub body: Vec<u8>,
+    body: Vec<u8>,
     /// Headers that were set.
     pub headers: Vec<(String, String)>,
 }
 
 impl RecordedRequest {
+    /// Creates a recorded request value.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(Method::Get, "https://example.test/x", b"{}".to_vec(), Vec::new());
+    /// assert_eq!(recorded.body(), b"{}");
+    /// ```
+    #[must_use]
+    pub fn new(
+        method: Method,
+        url: impl Into<String>,
+        body: Vec<u8>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            method,
+            url: url.into(),
+            body,
+            headers,
+        }
+    }
+
+    /// Body bytes exactly as handed to the transport.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(Method::Get, "https://example.test/x", b"{}".to_vec(), Vec::new());
+    /// assert_eq!(recorded.body(), b"{}");
+    /// ```
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// The body parsed as JSON.
     ///
     /// # Errors
@@ -543,7 +579,7 @@ impl RecordedRequest {
     /// ```
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
-    /// let recorded = RecordedRequest { method: Method::Get, url: String::new(), body: b"not json".to_vec(), headers: Vec::new() };
+    /// let recorded = RecordedRequest::new(Method::Get, String::new(), b"not json".to_vec(), Vec::new());
     /// assert!(recorded.json().is_err());
     /// ```
     pub fn json(&self) -> Result<Value> {
@@ -556,7 +592,12 @@ impl RecordedRequest {
     /// ```
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
-    /// let recorded = RecordedRequest { method: Method::Get, url: "https://api.letterxpress.de/v3/printjobs?filter=hold".to_string(), body: Vec::new(), headers: Vec::new() };
+    /// let recorded = RecordedRequest::new(
+    ///     Method::Get,
+    ///     "https://api.letterxpress.de/v3/printjobs?filter=hold".to_string(),
+    ///     Vec::new(),
+    ///     Vec::new(),
+    /// );
     /// assert_eq!(recorded.path_and_query(), "/v3/printjobs?filter=hold");
     /// ```
     #[must_use]
@@ -567,6 +608,32 @@ impl RecordedRequest {
                 match after_scheme.find('/') {
                     Some(path_start) => &after_scheme[path_start..],
                     None => "/",
+                }
+
+                impl fmt::Debug for RecordedRequest {
+                    /// Prints method, URL, headers and body **length** — never the body.
+                    ///
+                    /// ```
+                    /// use letterxpress::transport::{Method, RecordedRequest};
+                    ///
+                    /// let recorded = RecordedRequest::new(
+                    ///     Method::Post,
+                    ///     "https://example.test/",
+                    ///     br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+                    ///     Vec::new(),
+                    /// );
+                    /// let debug = format!("{recorded:?}");
+                    /// assert!(!debug.contains("secret"));
+                    /// assert!(debug.contains("28 bytes"));
+                    /// ```
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        f.debug_struct("RecordedRequest")
+                            .field("method", &self.method)
+                            .field("url", &self.url)
+                            .field("body", &format!("{} bytes", self.body.len()))
+                            .field("headers", &self.headers)
+                            .finish()
+                    }
                 }
             }
             None => self.url.as_str(),
@@ -638,12 +705,12 @@ impl<T: Transport> Transport for RecordingTransport<T> {
     async fn execute(&self, request: Request) -> Result<Response> {
         {
             let mut log = lock(&self.log);
-            log.push(RecordedRequest {
-                method: request.method,
-                url: request.url.clone(),
-                body: request.body.clone().unwrap_or_default(),
-                headers: request.headers.clone(),
-            });
+            log.push(RecordedRequest::new(
+                request.method,
+                request.url.clone(),
+                request.body.clone().unwrap_or_default(),
+                request.headers.clone(),
+            ));
         }
         self.inner.execute(request).await
     }
@@ -815,5 +882,18 @@ mod tests {
         );
         let debug = format!("{request:?}");
         assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn recorded_request_debug_never_prints_the_body() {
+        let recorded = RecordedRequest::new(
+            Method::Post,
+            "https://example.test/",
+            br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+            Vec::new(),
+        );
+        let debug = format!("{recorded:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("28 bytes"));
     }
 }

@@ -783,38 +783,42 @@ fn request_debug_hides_the_body_and_paths_extract_correctly() {
     assert!(debug.contains("6 bytes"));
     assert_eq!(request.header("content-type"), Some("application/json"));
 
-    let recorded = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de/v3/printjobs?filter=hold".into(),
-        body: b"{}".to_vec(),
-        headers: Vec::new(),
-    };
+    let recorded = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de/v3/printjobs?filter=hold",
+        b"{}".to_vec(),
+        Vec::new(),
+    );
     assert_eq!(recorded.path_and_query(), "/v3/printjobs?filter=hold");
 
-    let bare_host = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let bare_host = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(bare_host.path_and_query(), "/");
 
-    let relative = RecordedRequest {
-        method: Method::Get,
-        url: "/v3/balance".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let relative = RecordedRequest::new(Method::Get, "/v3/balance", Vec::new(), Vec::new());
     assert_eq!(relative.path_and_query(), "/v3/balance");
 
-    assert!(RecordedRequest {
-        method: Method::Get,
-        url: String::new(),
-        body: b"not json".to_vec(),
-        headers: Vec::new(),
-    }
-    .json()
-    .is_err());
+    assert!(
+        RecordedRequest::new(Method::Get, String::new(), b"not json".to_vec(), Vec::new())
+            .json()
+            .is_err()
+    );
+
+    let recorded_debug = format!(
+        "{:?}",
+        RecordedRequest::new(
+            Method::Post,
+            "https://example.test/v3/printjobs",
+            br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+            Vec::new(),
+        )
+    );
+    assert!(!recorded_debug.contains("secret"));
+    assert!(recorded_debug.contains("28 bytes"));
 }
 
 #[tokio::test]
