@@ -528,6 +528,10 @@ pub struct RecordedRequest {
     /// Full URL, including query string.
     pub url: String,
     /// Body bytes exactly as handed to the transport.
+    ///
+    /// Private on purpose: the body carries the API key and a base64 letter, so
+    /// the redacting [`Debug`] impl must not be bypassable through a struct
+    /// literal. Use [`RecordedRequest::body`] to read it.
     body: Vec<u8>,
     /// Headers that were set.
     pub headers: Vec<(String, String)>,
@@ -609,35 +613,36 @@ impl RecordedRequest {
                     Some(path_start) => &after_scheme[path_start..],
                     None => "/",
                 }
-
-                impl fmt::Debug for RecordedRequest {
-                    /// Prints method, URL, headers and body **length** — never the body.
-                    ///
-                    /// ```
-                    /// use letterxpress::transport::{Method, RecordedRequest};
-                    ///
-                    /// let recorded = RecordedRequest::new(
-                    ///     Method::Post,
-                    ///     "https://example.test/",
-                    ///     br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
-                    ///     Vec::new(),
-                    /// );
-                    /// let debug = format!("{recorded:?}");
-                    /// assert!(!debug.contains("secret"));
-                    /// assert!(debug.contains("28 bytes"));
-                    /// ```
-                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                        f.debug_struct("RecordedRequest")
-                            .field("method", &self.method)
-                            .field("url", &self.url)
-                            .field("body", &format!("{} bytes", self.body.len()))
-                            .field("headers", &self.headers)
-                            .finish()
-                    }
-                }
             }
             None => self.url.as_str(),
         }
+    }
+}
+
+impl fmt::Debug for RecordedRequest {
+    /// Prints method, URL, headers and body **length** — never the body, which
+    /// carries the API key and a base64 letter.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(
+    ///     Method::Post,
+    ///     "https://example.test/",
+    ///     br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+    ///     Vec::new(),
+    /// );
+    /// let debug = format!("{recorded:?}");
+    /// assert!(!debug.contains("secret"));
+    /// assert!(debug.contains("28 bytes"));
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordedRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("body", &format!("{} bytes", self.body.len()))
+            .field("headers", &self.headers)
+            .finish()
     }
 }
 
@@ -895,5 +900,56 @@ mod tests {
         let debug = format!("{recorded:?}");
         assert!(!debug.contains("secret"));
         assert!(debug.contains("28 bytes"));
+    }
+
+    #[test]
+    fn recorded_request_debug_covers_the_empty_and_one_byte_body_boundary() {
+        let empty =
+            RecordedRequest::new(Method::Get, "https://example.test/", Vec::new(), Vec::new());
+        let debug = format!("{empty:?}");
+        assert!(debug.contains("0 bytes"));
+
+        let one_byte = RecordedRequest::new(
+            Method::Get,
+            "https://example.test/",
+            b"Z".to_vec(),
+            Vec::new(),
+        );
+        let debug = format!("{one_byte:?}");
+        assert!(debug.contains("1 bytes"));
+        assert!(!debug.contains('Z'));
+        assert_eq!(one_byte.body(), b"Z");
+    }
+
+    /// The reported leak path: `format!("{recorder:?}")` and a failed
+    /// `assert_eq!` on `requests()` both render the log through this wrapper.
+    #[test]
+    fn recorder_debug_never_prints_the_body() {
+        let recorder =
+            RecordingTransport::new(MockTransport::new([Ok(Response::json_response(200, "{}"))]));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            recorder
+                .execute(Request::new(
+                    Method::Post,
+                    "https://example.test/v3/printjobs",
+                    Some(br#"{"auth":{"apikey":"secret"}}"#.to_vec()),
+                ))
+                .await
+                .expect("scripted response");
+        });
+
+        let debug = format!("{recorder:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("28 bytes"));
+
+        let rendered_log = format!("{:?}", recorder.requests());
+        assert!(!rendered_log.contains("secret"));
+        assert_eq!(
+            recorder.requests()[0].body(),
+            br#"{"auth":{"apikey":"secret"}}"#
+        );
     }
 }
