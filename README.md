@@ -132,7 +132,7 @@ the request exactly once and never retries it.
 
 | Failure | What it means | What to do |
 | --- | --- | --- |
-| `Error::RateLimited` | 429, rejected before processing | retry after `Retry-After` |
+| `Error::RateLimited` | 429, rejected before processing | wait `error.retry_after()` (never more than 5 min) and retry; `None` means no usable header — back off exponentially |
 | `Error::Transport { kind: Connect }` | nothing was written | safe to retry |
 | `Error::Transport { kind: Timeout \| Io }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
@@ -143,6 +143,13 @@ the request exactly once and never retries it.
 `is_retryable()` is true only for connection failures and 429; `is_ambiguous()`
 is true only for `Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as
 idempotent and never promoted to `Ambiguous`.
+
+`Retry-After` is clamped to `MAX_RETRY_AFTER` (5 minutes) where the header is
+decoded and again by `Error::retry_after()`, so a `429` carrying `86400` — a
+proxy's throttle, a misconfigured edge, a hostile answer — parks a caller for
+five minutes, not for a day. `None` means the header was absent or unreadable
+(an HTTP-date, a negative number, a list): back off on your own rather than
+retrying immediately, because the exhausted window refills per minute.
 
 ## Feature matrix
 
@@ -170,8 +177,9 @@ stack, no async runtime, no socket. Bring your own `Transport` implementation
   another host.
 - Payload sizes are checked before allocation; decoded base64 is bounded by the
   documented 50 MB; a decoded job is bounded to 50 000 items of at most 10 000
-  pages each, so `PrintJob::pages()` cannot overflow; error bodies are truncated
-  to 512 characters before they reach a log line.
+  pages each, so `PrintJob::pages()` cannot overflow; a provider `Retry-After`
+  is bounded to `MAX_RETRY_AFTER`; error bodies are truncated to 512 characters
+  before they reach a log line.
 - There is no shared secret to compare in this protocol (the key is a bearer
   credential in the body, not a signature the client verifies), so there is no
   constant-time comparison to make. Nothing in the crate logs a body.
