@@ -7,7 +7,8 @@
 //!    that only reads the body cannot tell it apart from a malformed success.
 //! 2. Successful answers repeat the code in the body (`"status": 200`). When
 //!    both are present they agree; when only the body carries a 4xx/5xx code,
-//!    that code is honoured too.
+//!    that code is honoured too. A body-level 429 is the same rate-limit
+//!    signal as an HTTP 429, including the `Retry-After` hint.
 //!
 //! ```
 //! use letterxpress::transport::Response;
@@ -144,7 +145,8 @@ impl Envelope {
 ///
 /// [`Error::Unauthorized`], [`Error::Forbidden`], [`Error::NotFound`],
 /// [`Error::MethodNotAllowed`], [`Error::RateLimited`], [`Error::Rejected`],
-/// [`Error::Upstream`], [`Error::Json`] and [`Error::UnexpectedShape`].
+/// [`Error::Upstream`], [`Error::Json`], [`Error::UnexpectedStatus`] and
+/// [`Error::UnexpectedShape`].
 ///
 /// An empty or whitespace-only body is an envelope with no `data`, exactly like
 /// a literal `null` body. Endpoints that require a payload still report
@@ -160,6 +162,14 @@ impl Envelope {
 /// let limited = Response::new(429, [("Retry-After".to_string(), "30".to_string())], Vec::new());
 /// let error = letterxpress::parse_envelope("POST /v3/printjobs", limited).unwrap_err();
 /// assert_eq!(error.status(), Some(429));
+///
+/// let body_limited = Response::new(200, [("Retry-After".to_string(), "30".to_string())], br#"{"status":429,"message":"Too Many Requests"}"#.to_vec());
+/// let error = letterxpress::parse_envelope("POST /v3/printjobs", body_limited).unwrap_err();
+/// assert!(matches!(error, letterxpress::Error::RateLimited { retry_after: Some(delay) } if delay.as_secs() == 30));
+///
+/// let redirect = Response::new(302, std::iter::empty(), Vec::new());
+/// let error = letterxpress::parse_envelope("GET /v3/balance", redirect).unwrap_err();
+/// assert!(matches!(error, letterxpress::Error::UnexpectedStatus { status: 302, .. }));
 ///
 /// let empty = letterxpress::parse_envelope("DELETE /v3/printjobs/{id}", Response::new(204, std::iter::empty(), Vec::new()))?;
 /// assert!(empty.data().is_none());
@@ -181,7 +191,7 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
         return Err(error);
     }
     // A body-level 4xx/5xx code is honoured when the HTTP status said 2xx.
-    if let Some(error) = body_error(body_status, message.as_deref()) {
+    if let Some(error) = body_error(body_status, message.as_deref(), &response) {
         return Err(error);
     }
 
@@ -230,17 +240,26 @@ fn http_error(
             message: text,
         }),
         200..=299 => None,
-        // 1xx/3xx: redirects are not followed, because following one would send
-        // the credential to whatever host the redirect names.
+        // Redirects are not followed, because following one would send the
+        // credential to whatever host the redirect names. The caller knows
+        // whether the request was idempotent; this layer only reports the
+        // status class.
+        100..=199 | 300..=399 => Some(Error::UnexpectedStatus {
+            status,
+            endpoint,
+            message: text,
+        }),
         _ => Some(Error::UnexpectedShape {
             endpoint,
             message: format!("unexpected HTTP status {status}: {text}"),
+            source: None,
         }),
     }
 }
 
-/// Maps a body-level status when the HTTP status said 2xx.
-fn body_error(status: Option<u16>, message: Option<&str>) -> Option<Error> {
+/// Maps a body-level status when the HTTP status said 2xx, using the same
+/// `Retry-After` header as the HTTP-status path.
+fn body_error(status: Option<u16>, message: Option<&str>, response: &Response) -> Option<Error> {
     let status = status?;
     let text = message.unwrap_or_default().to_string();
     match status {
@@ -248,6 +267,9 @@ fn body_error(status: Option<u16>, message: Option<&str>) -> Option<Error> {
         403 => Some(Error::Forbidden { message: text }),
         404 => Some(Error::NotFound { message: text }),
         405 => Some(Error::MethodNotAllowed { message: text }),
+        429 => Some(Error::RateLimited {
+            retry_after: parse_retry_after(response),
+        }),
         500..=599 => Some(Error::Upstream {
             status,
             message: text,
@@ -374,10 +396,9 @@ pub(crate) fn decode_base64(field: &'static str, encoded: &str) -> Result<Vec<u8
             max: max_encoded,
         });
     }
-    let bytes = STANDARD.decode(trimmed).map_err(|error| Error::Base64 {
-        field,
-        message: error.to_string(),
-    })?;
+    let bytes = STANDARD
+        .decode(trimmed)
+        .map_err(|source| Error::Base64 { field, source })?;
     if bytes.len() > crate::MAX_PDF_BYTES {
         return Err(Error::TooLarge {
             field,
@@ -440,6 +461,47 @@ mod tests {
             Err(Error::Unauthorized { message }) => assert_eq!(message, "Unauthorized."),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn informational_and_redirect_statuses_are_reported_without_method_context() {
+        for status in [100, 199, 300, 399] {
+            let response = Response::json_response(status, r#"{"message":"notice"}"#);
+            let error = parse_envelope("GET /v3/balance", response).expect_err("must fail");
+            assert!(
+                matches!(&error, Error::UnexpectedStatus { status: actual, .. } if *actual == status),
+                "{status}: {error:?}"
+            );
+            assert_eq!(error.status(), Some(status));
+            assert!(!error.is_ambiguous());
+            assert!(!error.is_retryable());
+            assert!(
+                !error.is_retryable_for(true),
+                "{status}: a redirect is terminal even for a read"
+            );
+            assert!(error.to_string().contains(&status.to_string()));
+        }
+
+        for status in [200, 299] {
+            let response = Response::json_response(status, r#"{"status":200,"data":{}}"#);
+            assert!(
+                parse_envelope("GET /v3/balance", response).is_ok(),
+                "{status}"
+            );
+        }
+
+        let error = parse_envelope(
+            "POST /v3/printjobs",
+            Response::new(302, std::iter::empty(), Vec::new()),
+        )
+        .expect_err("the parser has no method context");
+        assert!(matches!(error, Error::UnexpectedStatus { status: 302, .. }));
+
+        let response = Response::json_response(400, r#"{"message":"bad"}"#);
+        assert!(matches!(
+            parse_envelope("GET /v3/balance", response),
+            Err(Error::Rejected { status: 400, .. })
+        ));
     }
 
     #[test]

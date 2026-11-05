@@ -48,12 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("2 pages, B&W simplex: {}", quote.price);
 
     let letter = Letter::new(&std::fs::read("antrag.pdf")?)?
-        .with_shipping(Shipping::National)
+        .with_shipping(Shipping::National)?
         .with_registered(Registered::EinschreibenEinwurf)?
         .with_notice("antrag-4711")?;
 
     let job = client.submit_print_job(&letter).await?;
-    println!("job {} totals {}", job.id, job.total());
+    println!("job {} totals {}", job.id, job.total()?);
     Ok(())
 }
 ```
@@ -132,17 +132,23 @@ the request exactly once and never retries it.
 
 | Failure | What it means | What to do |
 | --- | --- | --- |
-| `Error::RateLimited` | 429, rejected before processing | wait `error.retry_after()` (never more than 5 min) and retry; `None` means no usable header — back off exponentially |
-| `Error::Transport { kind: Connect }` | nothing was written | safe to retry |
-| `Error::Transport { kind: Timeout \| Io }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
+| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | wait `error.retry_after()` (never more than 5 min) and retry; `None` means no usable header — back off exponentially |
+| `Error::Transport { kind: Connect, .. }` | nothing was written | safe to retry |
+| `Error::Transport { kind: Timeout \| Io, .. }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
+| `Error::UnexpectedStatus` on a **submit** (1xx/3xx) | promoted to `Error::Ambiguous` — the request may have been processed; redirects are not followed | reconcile, then resubmit |
 | `Error::Json` / `MissingField` / `UnexpectedShape` on a **submit** (2xx with an undecodable body) | promoted to `Error::Ambiguous` — the job exists, its tracking data does not decode | reconcile (list `print_jobs`), then resubmit only if absent |
 | `Error::Ambiguous` | the letter may already exist | list `print_jobs` and look for your `notice` |
-| `Error::Rejected` (4xx) | the body was refused | fix the input |
+| `Error::Rejected` (4xx other than 429) | the body was refused | fix the input |
 
-`is_retryable()` is true only for connection failures and 429; `is_ambiguous()`
-is true only for `Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as
-idempotent and never promoted to `Ambiguous`.
+`is_retryable_for(idempotent)` answers the retry question for the request that
+failed: a 429, a connection that never reached the provider, and — for a read,
+`PUT` or `DELETE` — a 5xx or a mid-flight failure. `is_retryable()` is the
+conservative alias for `is_retryable_for(false)`, so a submit is only ever
+retried when nothing can have been billed; `retry_after()` adds the provider's
+own backoff hint when it sent one. `is_ambiguous()` is true only for
+`Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as idempotent and
+never promoted to `Ambiguous`.
 
 `Retry-After` is clamped to `MAX_RETRY_AFTER` (5 minutes) where the header is
 decoded and again by `Error::retry_after()`, so a `429` carrying `86400` — a

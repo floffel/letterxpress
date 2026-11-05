@@ -121,6 +121,7 @@ async fn submit_print_job_posts_the_full_letter_object() {
         .with_color(letterxpress::Color::Color)
         .with_print_mode(letterxpress::PrintMode::Duplex)
         .with_shipping(Shipping::National)
+        .expect("national shipping")
         .with_c4_envelope(true)
         .with_filename_original("Rechnung-1.pdf")
         .expect("filename");

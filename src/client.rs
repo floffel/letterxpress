@@ -5,8 +5,8 @@
 //! even `GET` and `DELETE` carry), sends it once, and decodes the envelope. No
 //! method retries: a submit that may have been processed returns
 //! [`Error::Ambiguous`](crate::Error::Ambiguous) instead — after a timeout, a
-//! 5xx, or a 2xx whose body does not decode — so a caller cannot double-send a
-//! letter by accident.
+//! 5xx, a 1xx/3xx answer, or a 2xx whose body does not decode — so a caller
+//! cannot double-send a letter by accident.
 //!
 //! ```no_run
 //! # #[cfg(feature = "http")]
@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
+use url::Url;
 
 use crate::letter::validate_email;
 use crate::response::{parse_envelope, Envelope};
@@ -36,19 +37,33 @@ use crate::transport::{Method, Request, Transport};
 use crate::{
     Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage, EmailJobSubmission,
     InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal, JournalType, Letter, Mode,
-    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Shipping, Specification,
-    TransactionFilter, TransactionPage, TransportKind,
+    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Specification, TransactionFilter,
+    TransactionPage, TransportKind,
 };
 use crate::{Error, Result};
 
 /// The documented base URL (p. 6 of the v3 documentation).
 pub const DEFAULT_BASE_URL: &str = "https://api.letterxpress.de/v3";
 
+/// The authority component of an `https://` URL, before any path, query or
+/// fragment. The scheme comparison is ASCII case-insensitive.
+fn base_url_authority(url: &str) -> Option<&str> {
+    const SCHEME: &str = "https://";
+
+    let scheme = url.get(..SCHEME.len())?;
+    if !scheme.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+    let rest = url.get(SCHEME.len()..)?;
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
 /// Documented rate limit: 120 requests per minute (p. 3).
 ///
 /// The client does not throttle — a library that sleeps is a library that
 /// surprises its caller. Budget for this in the caller, or react to
-/// [`Error::RateLimited`].
+/// [`Error::RateLimited`] and wait out [`Error::retry_after`].
 pub const RATE_LIMIT_PER_MINUTE: u32 = 120;
 
 /// Default per-request timeout.
@@ -107,10 +122,11 @@ impl<T> Client<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] unless the URL is `https://`, has no userinfo
-    /// (`user@host`), no query string and no fragment. Credentials are sent to
-    /// this host on every call, so a plaintext or ambiguous URL is refused
-    /// rather than sanitised.
+    /// [`Error::Validation`] unless the URL is an absolute `https://` URL with
+    /// a non-empty host and a valid port, no userinfo (`user@host`), no query
+    /// string and no fragment. The scheme is matched case-insensitively, as URL
+    /// schemes are. Credentials are sent to this host on every call, so a
+    /// plaintext or ambiguous URL is refused rather than sanitised.
     ///
     /// ```
     /// use letterxpress::{Client, Credentials, Mode};
@@ -119,36 +135,53 @@ impl<T> Client<T> {
     /// let client = Client::new(MockTransport::default(), Credentials::new("u", "k", Mode::Test)?);
     /// assert!(client.clone().with_base_url("http://api.letterxpress.de/v3").is_err());
     /// assert!(client.clone().with_base_url("https://user@api.letterxpress.de/v3").is_err());
+    /// assert!(client.clone().with_base_url("https:///v3").is_err());
+    /// assert!(client.clone().with_base_url("https://api.letterxpress.de:65536/v3").is_err());
+    /// assert!(client.clone().with_base_url("HTTPS://api.letterxpress.de/v3").is_ok());
+    /// assert!(client.clone().with_base_url("https://api.letterxpress.de:65535/v3").is_ok());
     /// assert!(client.with_base_url("https://api.letterxpress.de/v3/").is_ok());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Result<Self> {
         let base_url = base_url.into();
         let trimmed = base_url.trim().trim_end_matches('/');
-        if !trimmed.starts_with("https://") {
+        if trimmed.chars().any(char::is_whitespace) {
+            return Err(Error::invalid("base_url", "must not contain whitespace"));
+        }
+        let parsed = Url::parse(trimmed).map_err(|error| {
+            Error::invalid(
+                "base_url",
+                format!("must be a valid https URL with a host and valid port: {error}"),
+            )
+        })?;
+        if parsed.scheme() != "https" {
             return Err(Error::invalid(
                 "base_url",
                 "must start with https:// (credentials travel in every body)",
             ));
         }
-        let host_and_path = &trimmed["https://".len()..];
-        if host_and_path.is_empty() {
+        if parsed
+            .host_str()
+            .is_none_or(|host| host.trim_matches('.').is_empty())
+        {
             return Err(Error::invalid("base_url", "must name a host"));
         }
-        if host_and_path.contains('@') {
+        let authority = base_url_authority(trimmed)
+            .ok_or_else(|| Error::invalid("base_url", "must name a host"))?;
+        if authority.is_empty() {
+            return Err(Error::invalid("base_url", "must name a host"));
+        }
+        if authority.contains('@') {
             return Err(Error::invalid(
                 "base_url",
                 "must not contain userinfo (credentials belong in Credentials)",
             ));
         }
-        if host_and_path.contains('?') || host_and_path.contains('#') {
+        if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(Error::invalid(
                 "base_url",
                 "must not contain a query string or fragment",
             ));
-        }
-        if host_and_path.chars().any(char::is_whitespace) {
-            return Err(Error::invalid("base_url", "must not contain whitespace"));
         }
         self.base_url = trimmed.to_string();
         Ok(self)
@@ -739,12 +772,11 @@ impl PrintJobUpdate {
     /// assert!(PrintJobUpdate::new(international).with_registered(Registered::Einschreiben).is_err());
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self> {
-        if self.specification.shipping() == Shipping::International {
-            return Err(Error::invalid(
-                "letter.registered",
-                "registered mail is national only",
-            ));
-        }
+        crate::letter::check_registered_shipping(
+            "letter.registered",
+            Some(&registered),
+            &self.specification.shipping(),
+        )?;
         self.registered = Some(registered);
         Ok(self)
     }
@@ -900,10 +932,13 @@ impl<T: Transport> Client<T> {
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a price
+    /// query that pairs registered mail with international shipping is refused
+    /// locally — otherwise the provider's answer mapped as described on
+    /// [`Error`] — including [`Error::Ambiguous`] when a submit may have been
+    /// processed.
     pub async fn price(&self, request: &PriceRequest) -> Result<Price> {
+        request.validate()?;
         let body = json!({ "letter": request.to_json() });
         let envelope = self.call(Method::Get, "/price", None, Some(body)).await?;
         decode_data("GET /v3/price", envelope)
@@ -982,16 +1017,19 @@ impl<T: Transport> Client<T> {
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
     /// let letter = Letter::new(b"%PDF-1.4\n")?.with_notice("dispatch-1")?;
     /// let job = client.submit_print_job(&letter).await?;
-    /// assert_eq!(job.total().cents(), 81);
+    /// assert_eq!(job.total().expect("total").cents(), 81);
     /// # Ok(())
     /// # }
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a
+    /// letter that pairs registered mail with international shipping is refused
+    /// locally, before the upload — otherwise the provider's answer mapped as
+    /// described on [`Error`] — including [`Error::Ambiguous`] when a submit may
+    /// have been processed.
     pub async fn submit_print_job(&self, letter: &Letter) -> Result<PrintJob> {
+        letter.validate()?;
         let body = json!({ "letter": letter.to_json() });
         let envelope = self
             .call(Method::Post, "/printjobs", None, Some(body))
@@ -1085,10 +1123,13 @@ impl<T: Transport> Client<T> {
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a
+    /// letter that pairs registered mail with international shipping is refused
+    /// locally, before the upload — otherwise the provider's answer mapped as
+    /// described on [`Error`] — including [`Error::Ambiguous`] when a submit may
+    /// have been processed.
     pub async fn submit_email_job(&self, letter: &Letter) -> Result<EmailJobSubmission> {
+        letter.validate()?;
         let body = json!({ "letter": letter.to_json() });
         let envelope = self
             .call(Method::Post, "/emailjobs", None, Some(body))
@@ -1099,12 +1140,8 @@ impl<T: Transport> Client<T> {
         let data = envelope
             .require_data(endpoint)
             .map_err(promote_to_ambiguous)?;
-        EmailJobSubmission::parse(data).map_err(|error| {
-            promote_to_ambiguous(Error::UnexpectedShape {
-                endpoint,
-                message: error.to_string(),
-            })
-        })
+        EmailJobSubmission::parse(data)
+            .map_err(|source| promote_to_ambiguous(unexpected_shape(endpoint, source)))
     }
 
     /// `GET /v3/emailjobs` — one page of e-mail jobs.
@@ -1133,10 +1170,7 @@ impl<T: Transport> Client<T> {
             .await?;
         let pagination = envelope.pagination.clone();
         let data = envelope.require_data(endpoint)?;
-        EmailJobPage::parse(data, pagination).map_err(|error| Error::UnexpectedShape {
-            endpoint,
-            message: error.to_string(),
-        })
+        EmailJobPage::parse(data, pagination).map_err(|source| unexpected_shape(endpoint, source))
     }
 
     /// `GET /v3/emailjobs/{id}`.
@@ -1264,10 +1298,10 @@ impl<T: Transport> Client<T> {
     /// use letterxpress::transport::{MockTransport, Response};
     ///
     /// # async fn demo() -> Result<(), letterxpress::Error> {
-    /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"transactions":[{"amount":-0.81,"currency":"EUR"}]}}"#))]);
+    /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"transactions":[{"amount":0.81,"currency":"EUR"}]}}"#))]);
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
     /// let page = client.transactions(&TransactionQuery::new()).await?;
-    /// assert_eq!(page.entries[0].amount.cents(), -81);
+    /// assert_eq!(page.entries[0].amount.cents(), 81);
     /// # Ok(())
     /// # }
     /// ```
@@ -1292,7 +1326,7 @@ impl<T: Transport> Client<T> {
     /// # async fn demo() -> Result<(), letterxpress::Error> {
     /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"invoices":[{"id":25402,"amount":0.67,"vat":0.13,"invoice_date":"2020-05-31"}]}}"#))]);
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
-    /// assert_eq!(client.invoices(1).await?.invoices[0].total().cents(), 80);
+    /// assert_eq!(client.invoices(1).await?.invoices[0].total().expect("total").cents(), 80);
     /// # Ok(())
     /// # }
     /// ```
@@ -1424,21 +1458,30 @@ fn classify_transport(error: Error, method: Method) -> Error {
     match &error {
         Error::Transport {
             kind: TransportKind::Timeout | TransportKind::Io,
-            message,
+            source,
         } => Error::Ambiguous {
-            message: format!("{method} may have been processed: {message}"),
+            message: format!("{method} may have been processed: {source}"),
         },
         _ => error,
     }
 }
 
-/// A failed submit is ambiguous even when the failure is on our side: a 5xx,
-/// or a 2xx whose body does not decode, leaves the job possibly created and
-/// billed. Definitive answers (4xx, auth, rate limit) stay terminal.
+/// A failed submit is ambiguous even when the failure is on our side: a 5xx, a
+/// 1xx/3xx answer, or a 2xx whose body does not decode leaves the job possibly
+/// created and billed. Definitive answers (4xx, auth, rate limit) stay terminal.
 fn promote_to_ambiguous(error: Error) -> Error {
     match error {
         Error::Upstream { status, message } => Error::Ambiguous {
             message: format!("provider answered http {status} after the submit: {message}"),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint,
+            message,
+        } => Error::Ambiguous {
+            message: format!(
+                "provider answered http {status} for `{endpoint}` after the submit; the job may exist: {message}"
+            ),
         },
         Error::Json { source } => Error::Ambiguous {
             message: format!("provider answered 2xx with a body that is not JSON: {source}"),
@@ -1446,7 +1489,9 @@ fn promote_to_ambiguous(error: Error) -> Error {
         Error::MissingField { field, .. } => Error::Ambiguous {
             message: format!("provider answered 2xx without `{field}`: the job may exist"),
         },
-        Error::UnexpectedShape { endpoint, message } => Error::Ambiguous {
+        Error::UnexpectedShape {
+            endpoint, message, ..
+        } => Error::Ambiguous {
             message: format!(
                 "provider answered 2xx for `{endpoint}` with an undecodable body: {message}"
             ),
@@ -1455,13 +1500,19 @@ fn promote_to_ambiguous(error: Error) -> Error {
     }
 }
 
+/// Builds the typed shape error while keeping the decoder's cause reachable.
+fn unexpected_shape(endpoint: &'static str, source: serde_json::Error) -> Error {
+    Error::UnexpectedShape {
+        endpoint,
+        message: source.to_string(),
+        source: Some(Box::new(source)),
+    }
+}
+
 /// Decodes `data` into a typed model.
 fn decode_data<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) -> Result<D> {
     let data = envelope.require_data(endpoint)?;
-    serde_json::from_value(data).map_err(|error| Error::UnexpectedShape {
-        endpoint,
-        message: error.to_string(),
-    })
+    serde_json::from_value(data).map_err(|source| unexpected_shape(endpoint, source))
 }
 
 /// Decodes `data` for a submit that has already reached the provider.
@@ -1478,12 +1529,31 @@ fn decode_submitted<D: DeserializeOwned>(endpoint: &'static str, envelope: Envel
 mod tests {
     use super::*;
     use crate::transport::{MockTransport, Response};
+    use proptest::prelude::*;
 
     fn client() -> Client<MockTransport> {
         Client::new(
             MockTransport::default(),
             Credentials::new("u", "k", Mode::Test).expect("credentials"),
         )
+    }
+
+    proptest! {
+        #[test]
+        fn base_url_authority_stops_before_the_path(
+            host in "[a-z][a-z0-9.-]{0,62}",
+            path in "[A-Za-z0-9._~/-]{0,64}",
+        ) {
+            let url = format!("HTTPS://{host}/{path}");
+            prop_assert_eq!(base_url_authority(&url), Some(host.as_str()));
+        }
+
+        #[test]
+        fn base_url_authority_never_panics(text in ".*") {
+            if let Some(authority) = base_url_authority(&text) {
+                prop_assert!(text.contains(authority));
+            }
+        }
     }
 
     #[test]
@@ -1547,9 +1617,49 @@ mod tests {
     }
 
     #[test]
-    fn a_hostless_https_url_is_refused() {
-        assert!(client().with_base_url("https://").is_err());
-        assert!(client().with_base_url("   ").is_err());
+    fn a_base_url_requires_a_host_and_a_valid_port() {
+        for rejected in [
+            "https://",
+            "   ",
+            "https:///v3",
+            "https://:8443",
+            "https:////",
+            "https:////v3",
+            "https://./v3",
+            "https://api.letterxpress.de:65536/v3",
+            "https://api.letterxpress.de:not-a-port/v3",
+            "https://api.letterxpress.de:999999999999999999999/v3",
+            "HTTPS:///v3",
+        ] {
+            let error = client()
+                .with_base_url(rejected)
+                .expect_err("an invalid base URL must be refused");
+            assert!(
+                matches!(
+                    error,
+                    Error::Validation {
+                        field: "base_url",
+                        ..
+                    }
+                ),
+                "{rejected:?}: {error:?}"
+            );
+        }
+
+        for accepted in [
+            "https://a",
+            "https://api.letterxpress.de/v3",
+            "https://api.letterxpress.de:443/v3",
+            "https://api.letterxpress.de:65535/v3",
+            "https://[::1]:65535/v3",
+            "HTTPS://api.letterxpress.de/v3",
+            "hTtPs://api.letterxpress.de/v3",
+        ] {
+            assert!(
+                client().with_base_url(accepted).is_ok(),
+                "{accepted:?} must be accepted"
+            );
+        }
     }
 
     #[test]

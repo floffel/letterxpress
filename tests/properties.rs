@@ -1,22 +1,134 @@
 //! Property tests: the invariants that must hold for *every* input, not just
 //! the fixtures.
 //!
-//! Three groups: payload builders (a value that passes validation always
+//! Four groups: payload builders (a value that passes validation always
 //! produces the documented wire shape), parsers (no input panics, and decoding
-//! is permissive), and the money/date arithmetic.
+//! is permissive), the money/date arithmetic, and the retry decision.
 
 mod common;
+
+use std::time::Duration;
 
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    Color, Date, EmailOption, JobStatus, Letter, Mode, Money, PrintMode, Registered, Shipping,
-    MAX_NOTICE_CHARS, MAX_RETRY_AFTER,
+    Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode,
+    Registered, Shipping, TransportKind, MAX_NOTICE_CHARS, MAX_RETRY_AFTER,
 };
 use proptest::prelude::*;
 
+/// One `Error` per public variant, with `text` in every prose slot and
+/// `status`/`kind` in the slots that decide the stance. Kept exhaustive by
+/// hand: a variant added to the enum has to be added here too, which is what
+/// makes [`stance`] a statement about the whole enum.
+fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
+    use std::time::Duration;
+
+    vec![
+        Error::Validation {
+            field: "letter.notice",
+            message: text.into(),
+        },
+        Error::Unauthorized {
+            message: text.into(),
+        },
+        Error::Forbidden {
+            message: text.into(),
+        },
+        Error::NotFound {
+            message: text.into(),
+        },
+        Error::MethodNotAllowed {
+            message: text.into(),
+        },
+        Error::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        Error::Rejected {
+            status,
+            message: text.into(),
+        },
+        Error::Upstream {
+            status,
+            message: text.into(),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint: "GET /v3/balance",
+            message: text.into(),
+        },
+        Error::Ambiguous {
+            message: text.into(),
+        },
+        Error::Transport {
+            kind,
+            source: Box::new(std::io::Error::other(text)),
+        },
+        Error::Json {
+            source: serde_json::Error::io(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+        },
+        Error::MissingField {
+            endpoint: "GET /v3/balance",
+            field: "data",
+        },
+        Error::UnexpectedShape {
+            endpoint: "GET /v3/balance",
+            message: text.into(),
+            source: None,
+        },
+        Error::TooLarge {
+            field: "letter.base64_file",
+            len: 11,
+            max: 10,
+        },
+        Error::Base64 {
+            field: "invoice.base64_data",
+            source: base64::DecodeError::InvalidByte(0, b'!'),
+        },
+        Error::Utf8 {
+            field: "journal.csv_base64",
+        },
+    ]
+}
+
+/// The answers the documented table gives per variant: retry for a submit,
+/// retry for a read, ambiguity, whether a `Retry-After` hint is carried, and
+/// the HTTP status.
+fn stance(error: &Error) -> (bool, bool, bool, bool, Option<u16>) {
+    (
+        error.is_retryable(),
+        error.is_retryable_for(true),
+        error.is_ambiguous(),
+        error.retry_after().is_some(),
+        error.status(),
+    )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Credentials accept exactly non-empty, bounded, log-safe ASCII: graphic
+    /// characters and internal spaces, never bidi controls, separators, or
+    /// zero-width characters.
+    #[test]
+    fn credential_validation_accepts_only_ascii_graphic_and_space(
+        username in proptest::collection::vec(any::<char>(), 0..300),
+        apikey in proptest::collection::vec(any::<char>(), 0..550),
+    ) {
+        let username: String = username.into_iter().collect();
+        let apikey: String = apikey.into_iter().collect();
+        let expected_username = is_valid_credential_token(&username, 256);
+        let expected_apikey = is_valid_credential_token(&apikey, 512);
+
+        prop_assert_eq!(
+            Credentials::new(&username, "key", Mode::Test).is_ok(),
+            expected_username
+        );
+        prop_assert_eq!(
+            Credentials::new("user", &apikey, Mode::Test).is_ok(),
+            expected_apikey
+        );
+    }
 
     /// The checksum is always 32 lowercase hex characters and is the MD5 of the
     /// base64 text (not of the PDF bytes).
@@ -70,19 +182,19 @@ proptest! {
         }
     }
 
-    /// Money survives a trip through cents and back, for every plausible value.
+    /// Money survives a trip through cents and back, for every valid value.
     #[test]
-    fn cents_round_trip(cents in -100_000_000i64..100_000_000) {
-        prop_assert_eq!(Money::from_cents(cents).cents(), cents);
+    fn cents_round_trip(cents in 0i64..100_000_000) {
+        prop_assert_eq!(Money::from_cents(cents).map(Money::cents), Ok(cents));
     }
 
-    /// Net plus tax is the sum, in cents as in euro.
+    /// Net plus tax is the checked sum, in cents as in euro.
     #[test]
     fn totals_add_up(a in 0i64..100_000, b in 0i64..100_000) {
-        let net = Money::from_cents(a);
-        let vat = Money::from_cents(b);
-        prop_assert_eq!(net.total(vat).cents(), a + b);
-        prop_assert_eq!(net + vat, net.total(vat));
+        let net = Money::from_cents(a).expect("nonnegative");
+        let vat = Money::from_cents(b).expect("nonnegative");
+        prop_assert_eq!(net.total(vat).map(Money::cents), Ok(a + b));
+        prop_assert_eq!(net.checked_add(vat), net.total(vat));
     }
 
     /// Parsing a status and re-parsing its wire form is idempotent — including
@@ -153,11 +265,15 @@ proptest! {
             if job.status == JobStatus::Other(String::new()) {
                 prop_assert!(!job.is_terminal());
             }
-            prop_assert_eq!(job.total().cents(), job.net().cents() + job
-                .items
-                .iter()
-                .map(|item| item.vat.cents())
-                .sum::<i64>());
+            if let (Ok(total), Ok(net), Some(vat)) = (
+                job.total(),
+                job.net(),
+                job.items
+                    .iter()
+                    .try_fold(0i64, |sum, item| sum.checked_add(item.vat.cents())),
+            ) {
+                prop_assert_eq!(total.cents(), net.cents() + vat);
+            }
         }
         if let Ok(page) = serde_json::from_value::<letterxpress::PrintJobPage>(value.clone()) {
             prop_assert!(page.jobs.len() <= 1024);
@@ -266,6 +382,36 @@ proptest! {
         );
     }
 
+    /// A text field keeps every scalar spelling the provider could use: numbers
+    /// become their `Display` form, strings survive byte for byte, and an id
+    /// rendered as an integer or a float decodes to the same digits.
+    #[test]
+    fn text_fields_keep_the_providers_spelling(
+        number in any::<u64>(),
+        fraction in any::<f64>(),
+        text in ".*",
+    ) {
+        let job: letterxpress::PrintJob =
+            serde_json::from_value(serde_json::json!({"id": number, "notice": number}))
+                .expect("a number is a valid id and a valid notice");
+        let expected = number.to_string();
+        prop_assert_eq!(job.id.as_str(), expected.as_str());
+        prop_assert_eq!(job.notice.as_deref(), Some(expected.as_str()));
+
+        let job: letterxpress::PrintJob =
+            serde_json::from_value(serde_json::json!({"id": 1, "notice": text}))
+                .expect("any string is a notice");
+        prop_assert_eq!(job.notice.as_deref(), Some(text.as_str()));
+
+        if fraction.is_finite() {
+            let job: letterxpress::PrintJob =
+                serde_json::from_value(serde_json::json!({"id": 1, "notice": fraction}))
+                    .expect("a finite float is a notice");
+            let expected = fraction.to_string();
+            prop_assert_eq!(job.notice.as_deref(), Some(expected.as_str()));
+        }
+    }
+
     /// Every colour/print-mode/shipping combination produces a valid
     /// specification with the documented wire values.
     #[test]
@@ -293,6 +439,61 @@ proptest! {
         prop_assert!(matches!(json["mode"].as_str(), Some("simplex" | "duplex")));
         prop_assert!(matches!(json["shipping"].as_str(), Some("national" | "international" | "auto")));
         prop_assert_eq!(json["c4"].as_u64(), Some(u64::from(u8::from(c4))));
+    }
+
+    /// The registered/shipping rule is enforced from both sides: for every
+    /// class and both call orders, the pair is accepted exactly when the class
+    /// is not international, and an accepted letter never emits the pair the
+    /// provider documents as impossible.
+    #[test]
+    fn registered_mail_never_meets_international_shipping(
+        registered_index in 0usize..2,
+        shipping_index in 0usize..4,
+        registered_first in any::<bool>(),
+    ) {
+        let registered = if registered_index == 0 {
+            Registered::EinschreibenEinwurf
+        } else {
+            Registered::Einschreiben
+        };
+        let shipping = match shipping_index {
+            0 => Shipping::National,
+            1 => Shipping::International,
+            2 => Shipping::Auto,
+            // The carry-all spells the same wire value and must be caught too.
+            _ => Shipping::Other("International".into()),
+        };
+        let impossible = matches!(shipping_index, 1 | 3);
+
+        let letter = Letter::new(b"%PDF-1.4\n").expect("valid pdf");
+        let built = if registered_first {
+            letter
+                .with_registered(registered.clone())
+                .and_then(|letter| letter.with_shipping(shipping.clone()))
+        } else {
+            letter
+                .with_shipping(shipping.clone())
+                .and_then(|letter| letter.with_registered(registered))
+        };
+        prop_assert_eq!(built.is_ok(), !impossible);
+        if let Ok(letter) = built {
+            let json = letter.to_json();
+            prop_assert!(json.get("registered").is_some());
+            prop_assert!(!json["specification"]["shipping"]
+                .as_str()
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("international"));
+        }
+
+        // A price quote carries the same pair, so the same rule applies.
+        let quote = letterxpress::PriceRequest::new(1)
+            .expect("price")
+            .with_registered(Registered::Einschreiben)
+            .and_then(|request| request.with_shipping(shipping));
+        prop_assert_eq!(quote.is_ok(), !impossible);
+        if let Ok(quote) = quote {
+            prop_assert!(quote.to_json().get("registered").is_some());
+        }
     }
 
     /// Email addresses that pass validation are accepted by the builder, and an
@@ -410,6 +611,188 @@ proptest! {
             error
         );
     }
+
+    /// `Retry-After` round-trips through `Display`: what the wording shows is
+    /// what the caller can read back, and the seconds are `Duration::as_secs` —
+    /// a sub-second remainder is truncated, never rounded up into a retry that
+    /// would hit the limit again. A value above the ceiling is shown as the
+    /// wait a caller may act on, naming what the provider claimed.
+    #[test]
+    fn the_retry_after_wording_round_trips(
+        secs in any::<u64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let raw = std::time::Duration::new(secs, nanos);
+        let bounded = raw.min(MAX_RETRY_AFTER);
+        let rendered = letterxpress::Error::RateLimited {
+            retry_after: Some(raw),
+        }
+        .to_string();
+        let expected = if bounded == raw {
+            format!(
+                "letterxpress rate limit reached, retry after {}s",
+                bounded.as_secs()
+            )
+        } else {
+            format!(
+                "letterxpress rate limit reached, retry after {}s (capped from {}s)",
+                bounded.as_secs(),
+                raw.as_secs()
+            )
+        };
+        prop_assert_eq!(&rendered, &expected);
+
+        // The number the wording leads with is the wait `retry_after()` reports.
+        let parsed = rendered
+            .strip_prefix("letterxpress rate limit reached, retry after ")
+            .and_then(|tail| tail.split('s').next())
+            .and_then(|digits| digits.parse::<u64>().ok());
+        prop_assert_eq!(parsed, Some(bounded.as_secs()));
+    }
+
+    /// The stance belongs to the variant — plus the status or transport kind it
+    /// carries — never to the prose. Two errors of the same variant, built from
+    /// arbitrary and different text, answer identically; rendering either never
+    /// panics; and no variant is ever both retryable and ambiguous, because a
+    /// retry of a possibly-processed submit would bill a second letter.
+    #[test]
+    fn the_stance_belongs_to_the_variant_not_the_payload(
+        first in ".*",
+        second in ".*",
+        status in any::<u16>(),
+        kind in prop_oneof![
+            Just(TransportKind::Connect),
+            Just(TransportKind::Timeout),
+            Just(TransportKind::Io),
+            Just(TransportKind::Protocol),
+        ],
+    ) {
+        let left = every_variant(&first, status, kind);
+        let right = every_variant(&second, status, kind);
+        prop_assert_eq!(left.len(), right.len());
+
+        for (left, right) in left.iter().zip(right.iter()) {
+            prop_assert_eq!(stance(left), stance(right), "{} / {}", left, right);
+            prop_assert!(!left.to_string().is_empty());
+            prop_assert!(!right.to_string().is_empty());
+            prop_assert!(
+                !(left.is_retryable() && left.is_ambiguous()),
+                "{}: a possible duplicate is never retryable",
+                left
+            );
+            prop_assert!(
+                !(left.is_retryable_for(true) && left.is_ambiguous()),
+                "{}: a possible duplicate is never retryable, not even for a read",
+                left
+            );
+            if left.is_retryable() {
+                prop_assert!(
+                    left.is_retryable_for(true),
+                    "{}: an idempotent request is never worse off than a submit",
+                    left
+                );
+            }
+        }
+    }
+}
+
+fn is_valid_credential_token(value: &str, max: usize) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .chars()
+            .all(|character| character.is_ascii_graphic() || character == ' ')
+}
+
+#[test]
+fn the_retry_after_wording_truncates_at_the_second_boundary() {
+    use std::time::Duration;
+
+    let render = |retry_after: Option<Duration>| {
+        letterxpress::Error::RateLimited { retry_after }.to_string()
+    };
+
+    // Just inside the limit: 999 999 999 ns still reports whole seconds, so it
+    // is "0s" and not "1s".
+    assert_eq!(
+        render(Some(Duration::new(0, 999_999_999))),
+        "letterxpress rate limit reached, retry after 0s"
+    );
+    // Exactly at it.
+    assert_eq!(
+        render(Some(Duration::new(1, 0))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // And just past it: the remainder is truncated, not rounded.
+    assert_eq!(
+        render(Some(Duration::new(1, 1))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // The largest representable duration renders without wrapping — at the
+    // ceiling, naming the wait the provider claimed.
+    assert_eq!(
+        render(Some(Duration::new(u64::MAX, 999_999_999))),
+        format!(
+            "letterxpress rate limit reached, retry after {}s (capped from {}s)",
+            MAX_RETRY_AFTER.as_secs(),
+            u64::MAX
+        )
+    );
+    // No `Retry-After` at all: no suffix, and in particular not "0s".
+    assert_eq!(render(None), "letterxpress rate limit reached");
+}
+
+#[test]
+fn a_carried_status_is_reported_verbatim_at_both_ends_of_the_range() {
+    // The boundary pair for the `status` column: the smallest and largest code
+    // a `u16` can hold, plus the documented 4xx/5xx edges in between, come back
+    // unchanged rather than being clamped or mapped.
+    for status in [0, 1, 399, 400, 499, 500, 599, 600, u16::MAX] {
+        for error in [
+            Error::Rejected {
+                status,
+                message: "rejected".into(),
+            },
+            Error::Upstream {
+                status,
+                message: "upstream".into(),
+            },
+            Error::UnexpectedStatus {
+                status,
+                endpoint: "GET /v3/balance",
+                message: "redirect".into(),
+            },
+        ] {
+            assert_eq!(error.status(), Some(status), "{status}: {error}");
+            assert!(!error.is_retryable(), "{status}: {error}");
+            assert!(!error.is_ambiguous(), "{status}: {error}");
+        }
+    }
+}
+
+#[test]
+fn unreadable_json_and_the_wrong_shape_share_one_stance() {
+    // `Error::Json` is reached through `#[from] serde_json::Error` as well as by
+    // construction; both entries answer like the table's `Json` row, which is
+    // the same stance as `UnexpectedShape`: the same bytes fail the same way,
+    // so neither invites a retry.
+    let constructed = Error::Json {
+        source: serde_json::Error::io(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+    };
+    let converted = Error::from(serde_json::Error::io(std::io::Error::from(
+        std::io::ErrorKind::InvalidData,
+    )));
+    let shape = Error::UnexpectedShape {
+        endpoint: "GET /v3/balance",
+        message: "expected an object, got an array".into(),
+        source: None,
+    };
+
+    assert_eq!(stance(&constructed), stance(&converted));
+    assert_eq!(stance(&converted), stance(&shape));
+    assert_eq!(stance(&converted), (false, false, false, false, None));
+    assert!(std::error::Error::source(&converted).is_some());
 }
 
 #[test]
@@ -441,4 +824,95 @@ async fn a_letter_without_a_notice_is_still_submittable() {
     let letter = Letter::new(&pdf()).expect("letter");
     assert!(letter.notice().is_none());
     client.submit_print_job(&letter).await.expect("submit");
+}
+
+/// Any failure whose payload the client can vary: the status it carries, the
+/// transport kind that produced it, and the `Retry-After` a rate limit saw.
+fn arbitrary_errors(kind: TransportKind, status: u16, retry_after: Option<Duration>) -> Vec<Error> {
+    vec![
+        Error::Upstream {
+            status,
+            message: String::new(),
+        },
+        Error::Rejected {
+            status,
+            message: String::new(),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint: "GET /v3/balance",
+            message: String::new(),
+        },
+        Error::RateLimited { retry_after },
+        Error::Transport {
+            kind,
+            source: Box::new(std::io::Error::other("")),
+        },
+        Error::NotFound {
+            message: String::new(),
+        },
+        Error::Ambiguous {
+            message: String::new(),
+        },
+    ]
+}
+
+/// Every [`TransportKind`], listed rather than sampled from a `Debug` string.
+fn transport_kind_strategy() -> impl Strategy<Value = TransportKind> {
+    prop_oneof![
+        Just(TransportKind::Connect),
+        Just(TransportKind::Timeout),
+        Just(TransportKind::Io),
+        Just(TransportKind::Protocol),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The retry decision is a function of the error *and* the request, and the
+    /// two are consistent for every status, kind and `Retry-After` the provider
+    /// can produce:
+    ///
+    /// * `is_retryable()` is the submit answer, never the optimistic one;
+    /// * an idempotent request is never worse off than a submit;
+    /// * nothing retryable is ever ambiguous;
+    /// * `retry_after()` is exactly the hint the rate limit carried, and nothing
+    ///   else carries one.
+    #[test]
+    fn the_retry_decision_never_outruns_the_request_it_belongs_to(
+        kind in transport_kind_strategy(),
+        status in 100u16..=599,
+        retry_after in proptest::option::of(0u64..=86_400u64),
+    ) {
+        let retry_after = retry_after.map(Duration::from_secs);
+        for error in arbitrary_errors(kind, status, retry_after) {
+            let submit = error.is_retryable_for(false);
+            let read = error.is_retryable_for(true);
+
+            prop_assert_eq!(error.is_retryable(), submit, "{:?}", error);
+            if submit {
+                prop_assert!(read, "{:?}: a read is never worse off than a submit", error);
+            }
+            prop_assert!(
+                !(submit && error.is_ambiguous()),
+                "{:?}: a possible duplicate is never a retry",
+                error
+            );
+            prop_assert!(
+                !(read && error.is_ambiguous()),
+                "{:?}: a possible duplicate is never a retry, not even for a read",
+                error
+            );
+
+            if let Error::RateLimited { .. } = &error {
+                prop_assert_eq!(
+                    error.retry_after(),
+                    retry_after.map(|wait| wait.min(MAX_RETRY_AFTER))
+                );
+            } else {
+                prop_assert_eq!(error.retry_after(), None, "{:?}", error);
+            }
+        }
+    }
 }

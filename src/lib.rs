@@ -27,12 +27,12 @@
 //! println!("2 pages, B&W simplex: {}", quote.price);
 //!
 //! let letter = Letter::new(&std::fs::read("antrag.pdf")?)?
-//!     .with_shipping(Shipping::National)
+//!     .with_shipping(Shipping::National)?
 //!     .with_registered(Registered::EinschreibenEinwurf)?
 //!     .with_notice("antrag-4711")?;
 //!
 //! let job = client.submit_print_job(&letter).await?;
-//! println!("job {} at {}", job.id, job.total());
+//! println!("job {} at {}", job.id, job.total()?);
 //! # Ok(())
 //! # }
 //! ```
@@ -71,6 +71,11 @@
 //!   [`RecordingTransport`](crate::transport::RecordingTransport).
 //! * **No hidden retries.** A submit that may have reached the provider returns
 //!   [`Error::Ambiguous`]; the caller reconciles before resubmitting.
+//! * **Typed causes.** The variants that wrap a lower-level failure —
+//!   [`Error::Json`], [`Error::UnexpectedShape`], [`Error::Transport`] and
+//!   [`Error::Base64`] — keep it as `source`, so a `source()` walk (and the
+//!   `anyhow`/`tracing` chains built on it) reaches the `serde_json`, `reqwest`
+//!   or `base64` detail instead of a rendered sentence.
 //!
 //! # Feature flags
 //!
@@ -146,7 +151,7 @@ pub use letter::{
     MAX_BANK_AMOUNT_CHARS, MAX_BIC_CHARS, MAX_FILENAME_CHARS, MAX_IBAN_CHARS, MAX_NOTICE_CHARS,
     MAX_PAYEE_CHARS, MAX_PDF_BYTES, MAX_PURPOSE_CHARS,
 };
-pub use money::Money;
+pub use money::{Money, MoneyError};
 pub use response::{parse_envelope, Envelope};
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
