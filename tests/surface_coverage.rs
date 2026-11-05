@@ -676,7 +676,7 @@ fn every_error_variant_renders_and_classifies() {
                 message: "timeout".into(),
             },
             None,
-            true,
+            false,
             false,
         ),
         (
@@ -685,7 +685,7 @@ fn every_error_variant_renders_and_classifies() {
                 message: "reset".into(),
             },
             None,
-            true,
+            false,
             false,
         ),
         (
@@ -755,6 +755,11 @@ fn every_error_variant_renders_and_classifies() {
     for (error, status, retryable, ambiguous) in cases {
         assert_eq!(error.status(), status, "{error:?}");
         assert_eq!(error.is_retryable(), retryable, "{error:?}");
+        assert_eq!(
+            error.is_retryable_for(false),
+            retryable,
+            "{error:?}: `is_retryable()` is the submit answer"
+        );
         assert_eq!(error.is_ambiguous(), ambiguous, "{error:?}");
         assert!(!error.to_string().is_empty(), "{error:?}");
     }
@@ -776,9 +781,78 @@ fn transport_kinds_display_and_classify() {
     assert_eq!(TransportKind::Io.to_string(), "io");
     assert_eq!(TransportKind::Protocol.to_string(), "protocol");
     assert!(TransportKind::Connect.is_retryable());
-    assert!(TransportKind::Timeout.is_retryable());
-    assert!(TransportKind::Io.is_retryable());
+    assert!(!TransportKind::Timeout.is_retryable());
+    assert!(!TransportKind::Io.is_retryable());
     assert!(!TransportKind::Protocol.is_retryable());
+}
+
+#[test]
+fn transport_kinds_pair_across_the_idempotency_boundary() {
+    for (kind, submit, read) in [
+        (TransportKind::Connect, true, true),
+        (TransportKind::Timeout, false, true),
+        (TransportKind::Io, false, true),
+        (TransportKind::Protocol, false, false),
+    ] {
+        assert_eq!(kind.is_retryable_for(false), submit, "{kind}");
+        assert_eq!(kind.is_retryable_for(true), read, "{kind}");
+    }
+}
+
+#[test]
+fn the_retry_decision_depends_on_the_request_it_belongs_to() {
+    let upstream = Error::Upstream {
+        status: 503,
+        message: "service unavailable".into(),
+    };
+    assert!(upstream.is_retryable_for(Method::Get.is_idempotent()));
+    assert!(!upstream.is_retryable_for(Method::Post.is_idempotent()));
+    assert!(!upstream.is_retryable(), "the submit answer is the default");
+
+    for kind in [TransportKind::Timeout, TransportKind::Io] {
+        let broken = Error::Transport {
+            kind,
+            message: "mid-flight failure".into(),
+        };
+        assert!(!broken.is_retryable_for(false), "{kind}");
+        assert!(broken.is_retryable_for(true), "{kind}");
+    }
+
+    let refused = Error::Transport {
+        kind: TransportKind::Connect,
+        message: "dns".into(),
+    };
+    assert!(refused.is_retryable_for(false), "nothing was written");
+    assert!(refused.is_retryable_for(true));
+}
+
+#[test]
+fn retry_after_reports_only_the_providers_own_hint() {
+    use std::time::Duration;
+
+    let limited = Error::RateLimited {
+        retry_after: Some(Duration::from_secs(30)),
+    };
+    assert_eq!(limited.retry_after(), Some(Duration::from_secs(30)));
+    assert!(limited.is_retryable_for(true));
+    assert!(limited.is_retryable_for(false));
+
+    assert_eq!(
+        Error::RateLimited {
+            retry_after: Some(Duration::ZERO)
+        }
+        .retry_after(),
+        Some(Duration::ZERO),
+        "a zero-second hint still means \"wait none\""
+    );
+    assert_eq!(Error::RateLimited { retry_after: None }.retry_after(), None);
+    assert_eq!(
+        Error::Forbidden {
+            message: "no".into()
+        }
+        .retry_after(),
+        None
+    );
 }
 
 // ---------------------------------------------------------------------------

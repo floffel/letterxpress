@@ -48,7 +48,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.letterxpress.de/v3";
 ///
 /// The client does not throttle — a library that sleeps is a library that
 /// surprises its caller. Budget for this in the caller, or react to
-/// [`Error::RateLimited`].
+/// [`Error::RateLimited`] and wait out [`Error::retry_after`].
 pub const RATE_LIMIT_PER_MINUTE: u32 = 120;
 
 /// Default per-request timeout.

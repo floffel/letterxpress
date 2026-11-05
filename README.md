@@ -141,9 +141,14 @@ the request exactly once and never retries it.
 | `Error::Ambiguous` | the letter may already exist | list `print_jobs` and look for your `notice` |
 | `Error::Rejected` (4xx) | the body was refused | fix the input |
 
-`is_retryable()` is true only for connection failures and 429; `is_ambiguous()`
-is true only for `Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as
-idempotent and never promoted to `Ambiguous`.
+`is_retryable_for(idempotent)` answers the retry question for the request that
+failed: a 429, a connection that never reached the provider, and — for a read,
+`PUT` or `DELETE` — a 5xx or a mid-flight failure. `is_retryable()` is the
+conservative alias for `is_retryable_for(false)`, so a submit is only ever
+retried when nothing can have been billed; `retry_after()` adds the provider's
+own backoff hint when it sent one. `is_ambiguous()` is true only for
+`Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as idempotent and
+never promoted to `Ambiguous`.
 
 ## Feature matrix
 
