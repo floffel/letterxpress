@@ -3,9 +3,11 @@
 //! One `#[non_exhaustive]` enum with a `source` chain: every variant that wraps
 //! a lower-level failure keeps it as `#[source]` — [`Error::Json`] the
 //! `serde_json` error, [`Error::Transport`] the transport's own error,
-//! [`Error::Base64`] the decoder's — so a `source()` walk gets past the variant
-//! to the failure that actually explains it. Two questions decide whether a
-//! letter is sent twice, and the error alone cannot answer either:
+//! [`Error::Base64`] the decoder's, and [`Error::UnexpectedShape`] the
+//! `serde_json` error that rejected a decoded payload — so a `source()` walk
+//! gets past the variant to the failure that actually explains it. Two
+//! questions decide whether a letter is sent twice, and the error alone cannot
+//! answer either:
 //!
 //! * [`Error::is_retryable_for`] — "another attempt is safe **and** likely to
 //!   succeed **for this request**". Whether the request is idempotent is part
@@ -432,12 +434,37 @@ pub enum Error {
     /// A response parsed as JSON but did not have the documented shape.
     ///
     /// On a submit (a `POST`) this is reported as [`Error::Ambiguous`] instead.
+    ///
+    /// `source` is the `serde_json` error that rejected the payload when the
+    /// envelope was JSON but its `data` could not be decoded into the
+    /// documented model. Keeping it typed lets a caller inspect the exact
+    /// failure — an unknown field, a wrong type, or a missing field — and
+    /// downcast it with [`std::error::Error::source`]. It is `None` when the
+    /// shape was rejected without a lower-level error, such as an unknown HTTP
+    /// status.
+    ///
+    /// ```
+    /// use letterxpress::Error;
+    ///
+    /// let source = serde_json::from_str::<u32>("\"not a number\"").unwrap_err();
+    /// let error = Error::UnexpectedShape {
+    ///     endpoint: "GET /v3/balance",
+    ///     message: source.to_string(),
+    ///     source: Some(Box::new(source)),
+    /// };
+    /// let source = std::error::Error::source(&error).expect("typed cause");
+    /// assert!(source.downcast_ref::<serde_json::Error>().is_some());
+    /// assert!(!error.is_retryable_for(true));
+    /// ```
     #[error("response for `{endpoint}` has an unexpected shape: {message}")]
     UnexpectedShape {
         /// The endpoint that was called.
         endpoint: &'static str,
         /// What was expected and what arrived.
         message: String,
+        /// The decoding failure that rejected the payload, when there was one.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
 
     /// A PDF or text field exceeds a documented size ceiling. Checked before
@@ -1013,6 +1040,7 @@ mod tests {
                 Error::UnexpectedShape {
                     endpoint: "GET /v3/balance",
                     message: "expected an object, got an array".into(),
+                    source: None,
                 },
             ),
             row(

@@ -72,10 +72,10 @@
 //! * **No hidden retries.** A submit that may have reached the provider returns
 //!   [`Error::Ambiguous`]; the caller reconciles before resubmitting.
 //! * **Typed causes.** The variants that wrap a lower-level failure —
-//!   [`Error::Json`], [`Error::Transport`] and [`Error::Base64`] — keep it as
-//!   `source`, so a `source()` walk (and the `anyhow`/`tracing` chains built on
-//!   it) reaches the `serde_json`, `reqwest` or `base64` detail instead of a
-//!   rendered sentence.
+//!   [`Error::Json`], [`Error::UnexpectedShape`], [`Error::Transport`] and
+//!   [`Error::Base64`] — keep it as `source`, so a `source()` walk (and the
+//!   `anyhow`/`tracing` chains built on it) reaches the `serde_json`, `reqwest`
+//!   or `base64` detail instead of a rendered sentence.
 //!
 //! # Feature flags
 //!

@@ -52,6 +52,7 @@ fn expected_status_error(status: u16) -> Error {
         _ => Error::UnexpectedShape {
             endpoint: "GET /v3/balance",
             message: String::new(),
+            source: None,
         },
     }
 }
@@ -179,6 +180,92 @@ async fn malformed_json_on_success_is_a_json_error() {
     assert!(matches!(error, Error::Json { .. }));
     // The serde error keeps its position information as the source chain.
     assert!(std::error::Error::source(&error).is_some());
+}
+
+#[tokio::test]
+async fn decoded_shape_failures_keep_the_serde_error_reachable() {
+    // Just inside: a provider can add fields without breaking a read.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"id":6035143,"items":[],"provider_added":"new"}}"#,
+    );
+    let job = client
+        .print_job(&JobId::new("6035143").expect("id"))
+        .await
+        .expect("unknown fields stay ignored");
+    assert_eq!(job.id.as_str(), "6035143");
+
+    // Just outside: the same endpoint rejects a wrong type. Before the fix the
+    // serde error was rendered into `message` and `source()` returned `None`.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"id":6035143,"items":"not a list"}}"#,
+    );
+    let error = client
+        .print_job(&JobId::new("6035143").expect("id"))
+        .await
+        .expect_err("a wrong item shape cannot be decoded");
+
+    let source = std::error::Error::source(&error).expect("the serde cause stays reachable");
+    let source = source
+        .downcast_ref::<serde_json::Error>()
+        .expect("the source is the original serde_json error");
+    assert_eq!(source.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("items"), "{error}");
+    assert!(!error.is_retryable_for(true), "the same bytes fail again");
+}
+
+#[tokio::test]
+async fn email_page_shape_failures_keep_the_serde_error_reachable() {
+    // Just inside: unknown job fields do not prevent the page from decoding.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"emailjobs":[{"id":1,"provider_added":true}]}}"#,
+    );
+    let page = client
+        .email_jobs(&letterxpress::EmailJobQuery::new())
+        .await
+        .expect("unknown fields stay ignored");
+    assert_eq!(page.jobs.len(), 1);
+
+    // Just outside: `emailjobs` must be an array.
+    let client = client_for(200, r#"{"status":200,"data":{"emailjobs":{}}}"#);
+    let error = client
+        .email_jobs(&letterxpress::EmailJobQuery::new())
+        .await
+        .expect_err("an object is not a job list");
+
+    let source = std::error::Error::source(&error).expect("the serde cause stays reachable");
+    let source = source
+        .downcast_ref::<serde_json::Error>()
+        .expect("the source is the original serde_json error");
+    assert_eq!(source.classify(), serde_json::error::Category::Data);
+    assert!(matches!(
+        error,
+        Error::UnexpectedShape {
+            endpoint: "GET /v3/emailjobs",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn email_submit_shape_failures_remain_ambiguous() {
+    let letter = Letter::new(&pdf())
+        .expect("letter")
+        .with_email(
+            EmailDelivery::new("kunde@example.de", EmailOption::MailSecure).expect("delivery"),
+        )
+        .expect("email");
+    let client = client_for(200, r#"{"status":200,"data":{"nothing":true}}"#);
+    let error = client
+        .submit_email_job(&letter)
+        .await
+        .expect_err("the job may already exist");
+
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("undecodable body"), "{error}");
 }
 
 #[tokio::test]
