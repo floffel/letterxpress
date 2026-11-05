@@ -1,7 +1,11 @@
 //! Everything this crate can fail with, and what the caller can do about it.
 //!
-//! One `#[non_exhaustive]` enum with a `source` chain. Two questions decide
-//! whether a letter is sent twice, and the error alone cannot answer either:
+//! One `#[non_exhaustive]` enum with a `source` chain: every variant that wraps
+//! a lower-level failure keeps it as `#[source]` — [`Error::Json`] the
+//! `serde_json` error, [`Error::Transport`] the transport's own error,
+//! [`Error::Base64`] the decoder's — so a `source()` walk gets past the variant
+//! to the failure that actually explains it. Two questions decide whether a
+//! letter is sent twice, and the error alone cannot answer either:
 //!
 //! * [`Error::is_retryable_for`] — "another attempt is safe **and** likely to
 //!   succeed **for this request**". Whether the request is idempotent is part
@@ -367,12 +371,30 @@ pub enum Error {
     },
 
     /// No response was obtained from the provider.
-    #[error("transport error ({kind}): {message}")]
+    ///
+    /// `source` is the transport's own failure — `reqwest`/`hyper`/`rustls`
+    /// with the real stack, or whatever a custom
+    /// [`Transport`](crate::transport::Transport) implementation returns — kept
+    /// typed instead of flattened into a string, so `source()` and the
+    /// `anyhow`/`tracing` walks built on it reach the DNS, TLS or reset detail.
+    ///
+    /// ```
+    /// use letterxpress::{Error, TransportKind};
+    ///
+    /// let error = Error::Transport {
+    ///     kind: TransportKind::Connect,
+    ///     source: Box::new(std::io::Error::other("dns lookup failed")),
+    /// };
+    /// assert!(error.is_retryable(), "nothing was written");
+    /// assert!(std::error::Error::source(&error).is_some(), "the cause stays reachable");
+    /// ```
+    #[error("transport error ({kind}): {source}")]
     Transport {
         /// Failure class; decides whether a retry can duplicate a letter.
         kind: TransportKind,
-        /// Description from the transport.
-        message: String,
+        /// The transport's own error, with its cause chain intact.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
     /// A response body was not valid JSON.
@@ -428,12 +450,29 @@ pub enum Error {
     },
 
     /// A base64 payload in a response could not be decoded.
-    #[error("invalid base64 in `{field}`: {message}")]
+    ///
+    /// `source` is the decoder's own [`base64::DecodeError`] — the invalid byte
+    /// and the offset, or the input length — kept typed instead of flattened
+    /// into a string.
+    ///
+    /// ```
+    /// use base64::DecodeError;
+    /// use letterxpress::Error;
+    ///
+    /// let error = Error::Base64 {
+    ///     field: "invoice.base64_data",
+    ///     source: DecodeError::InvalidByte(3, b'!'),
+    /// };
+    /// assert!(std::error::Error::source(&error).is_some(), "the cause stays reachable");
+    /// assert!(error.to_string().contains("offset 3"), "{error}");
+    /// ```
+    #[error("invalid base64 in `{field}`: {source}")]
     Base64 {
         /// Field that carried the payload.
         field: &'static str,
-        /// Decoder message.
-        message: String,
+        /// The decoder's error: which symbol, and where.
+        #[source]
+        source: base64::DecodeError,
     },
 
     /// The provider returned a CSV document that is not valid UTF-8.
@@ -461,10 +500,16 @@ impl Error {
     /// assert!(!ambiguous.is_retryable());
     /// assert!(ambiguous.is_ambiguous());
     ///
-    /// let refused = Error::Transport { kind: TransportKind::Connect, message: "dns".into() };
+    /// let refused = Error::Transport {
+    ///     kind: TransportKind::Connect,
+    ///     source: Box::new(std::io::Error::other("dns")),
+    /// };
     /// assert!(refused.is_retryable(), "nothing was written");
     ///
-    /// let mid_flight = Error::Transport { kind: TransportKind::Io, message: "reset".into() };
+    /// let mid_flight = Error::Transport {
+    ///     kind: TransportKind::Io,
+    ///     source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    /// };
     /// assert!(!mid_flight.is_retryable(), "a submit may already be billed");
     /// ```
     #[must_use]
@@ -495,7 +540,10 @@ impl Error {
     /// assert!(upstream.is_retryable_for(Method::Get.is_idempotent()));
     /// assert!(!upstream.is_retryable_for(Method::Post.is_idempotent()));
     ///
-    /// let reset = Error::Transport { kind: TransportKind::Io, message: "reset".into() };
+    /// let reset = Error::Transport {
+    ///     kind: TransportKind::Io,
+    ///     source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    /// };
     /// assert!(!reset.is_retryable(), "the context-free answer is the submit one");
     /// assert!(reset.is_retryable_for(true), "a read can be repeated");
     /// ```
@@ -752,6 +800,29 @@ mod tests {
         }
     }
 
+    /// A stand-in for whatever a real transport returned: a type with a
+    /// `Display` and an `Error` impl, so the samples below carry a typed cause
+    /// the way `reqwest` and a custom transport do.
+    #[derive(Debug)]
+    struct Cause(&'static str);
+
+    impl std::fmt::Display for Cause {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Cause {}
+
+    /// A `Transport` error whose cause says `text` — the shape the table rows
+    /// and the per-kind test build.
+    fn transport_error(kind: TransportKind, text: &'static str) -> Error {
+        Error::Transport {
+            kind,
+            source: Box::new(Cause(text)),
+        }
+    }
+
     /// The rows of the table in [`Error`]'s documentation, one per line.
     #[allow(clippy::too_many_lines)] // one row per line of the table, on purpose
     fn table() -> Vec<Row> {
@@ -875,10 +946,7 @@ mod tests {
                 true,
                 false,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Connect,
-                    message: "dns".into(),
-                },
+                transport_error(TransportKind::Connect, "dns"),
             ),
             row(
                 "[`Error::Transport`] / `Timeout`",
@@ -887,10 +955,7 @@ mod tests {
                 true,
                 false,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Timeout,
-                    message: "no answer".into(),
-                },
+                transport_error(TransportKind::Timeout, "no answer"),
             ),
             row(
                 "[`Error::Transport`] / `Io`",
@@ -899,10 +964,7 @@ mod tests {
                 true,
                 false,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Io,
-                    message: "connection reset".into(),
-                },
+                transport_error(TransportKind::Io, "connection reset"),
             ),
             row(
                 "[`Error::Transport`] / `Protocol`",
@@ -911,10 +973,7 @@ mod tests {
                 false,
                 false,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Protocol,
-                    message: "no scripted response".into(),
-                },
+                transport_error(TransportKind::Protocol, "no scripted response"),
             ),
             row(
                 "[`Error::Json`]",
@@ -975,7 +1034,7 @@ mod tests {
                 false,
                 Error::Base64 {
                     field: "invoice.base64_data",
-                    message: "invalid symbol 33".into(),
+                    source: base64::DecodeError::InvalidByte(0, b'!'),
                 },
             ),
             row(
@@ -1151,10 +1210,7 @@ mod tests {
             assert_eq!(matching.len(), 1, "no single row spells `{label}`");
             let row = &matching[0];
 
-            let sample = Error::Transport {
-                kind: *kind,
-                message: "sample".into(),
-            };
+            let sample = transport_error(*kind, "sample");
             assert_eq!(sample.status(), documented_status(row), "`{label}`: status");
             assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
             assert_eq!(
@@ -1235,10 +1291,7 @@ mod tests {
     #[test]
     fn a_failure_that_cannot_have_been_billed_is_retryable_for_a_submit() {
         for error in [
-            Error::Transport {
-                kind: TransportKind::Connect,
-                message: "dns".into(),
-            },
+            transport_error(TransportKind::Connect, "dns"),
             Error::RateLimited { retry_after: None },
         ] {
             assert!(error.is_retryable_for(false), "{error:?}");
@@ -1273,11 +1326,7 @@ mod tests {
             "no hint is not no wait"
         );
         assert_eq!(
-            Error::Transport {
-                kind: TransportKind::Connect,
-                message: "dns".into(),
-            }
-            .retry_after(),
+            transport_error(TransportKind::Connect, "dns").retry_after(),
             None
         );
     }
@@ -1306,6 +1355,98 @@ mod tests {
             rows.len(),
             "the documentation and `table()` disagree on the number of rows"
         );
+    }
+
+    /// The defect this test file documents against: `Transport` flattened its
+    /// cause into a `String`, so `source()` stopped at the variant and a caller
+    /// could not tell DNS from TLS from a reset. The chain now runs through the
+    /// variant, and it *ends* — the deepest link has no source of its own.
+    #[test]
+    fn a_transport_error_keeps_the_whole_cause_chain() {
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("unexpected eof while reading the TLS record")
+            }
+        }
+
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("handshake failed")
+            }
+        }
+
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = Error::Transport {
+            kind: TransportKind::Io,
+            source: Box::new(Outer(Inner)),
+        };
+
+        let Some(first) = std::error::Error::source(&error) else {
+            panic!("the transport cause must survive the variant");
+        };
+        assert_eq!(first.to_string(), "handshake failed");
+        let Some(second) = first.source() else {
+            panic!("the cause of the cause must survive too");
+        };
+        assert_eq!(
+            second.to_string(),
+            "unexpected eof while reading the TLS record"
+        );
+        assert!(
+            second.source().is_none(),
+            "the chain ends, it does not loop"
+        );
+
+        // `Display` names the kind and the cause, exactly once.
+        assert_eq!(error.to_string(), "transport error (io): handshake failed");
+        // A mid-flight failure is only retryable for a request that is
+        // idempotent; the conservative answer stays `false`.
+        assert!(!error.is_retryable());
+        assert!(error.is_retryable_for(true));
+        assert!(!error.is_ambiguous());
+        assert_eq!(error.status(), None);
+    }
+
+    /// `Base64` keeps the decoder's error, so a caller can tell an invalid
+    /// symbol from a truncated input instead of parsing a sentence.
+    #[test]
+    fn a_base64_error_keeps_the_decoder_error_typed() {
+        use base64::DecodeError;
+
+        let truncated = DecodeError::InvalidLastSymbol(7, b'A');
+        let error = Error::Base64 {
+            field: "journal.csv_base64",
+            source: truncated.clone(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!("invalid base64 in `journal.csv_base64`: {truncated}")
+        );
+        let Some(source) = std::error::Error::source(&error) else {
+            panic!("the decoder error must stay reachable");
+        };
+        match source.downcast_ref::<DecodeError>() {
+            Some(DecodeError::InvalidLastSymbol(index, byte)) => {
+                assert_eq!((*index, *byte), (7, b'A'));
+            }
+            other => panic!("the source must be the decoder error, got {other:?}"),
+        }
+        assert!(!error.is_retryable());
+        assert_eq!(error.status(), None);
     }
 
     /// `retry_suffix` is only ever empty when there is nothing to say, and a

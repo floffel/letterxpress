@@ -1424,9 +1424,9 @@ fn classify_transport(error: Error, method: Method) -> Error {
     match &error {
         Error::Transport {
             kind: TransportKind::Timeout | TransportKind::Io,
-            message,
+            source,
         } => Error::Ambiguous {
-            message: format!("{method} may have been processed: {message}"),
+            message: format!("{method} may have been processed: {source}"),
         },
         _ => error,
     }

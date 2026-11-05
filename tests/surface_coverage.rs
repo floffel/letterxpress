@@ -664,7 +664,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Connect,
-                message: "dns".into(),
+                source: Box::new(std::io::Error::other("dns")),
             },
             None,
             true,
@@ -673,7 +673,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Timeout,
-                message: "timeout".into(),
+                source: Box::new(std::io::Error::other("timeout")),
             },
             None,
             false,
@@ -682,7 +682,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Io,
-                message: "reset".into(),
+                source: Box::new(std::io::Error::other("reset")),
             },
             None,
             false,
@@ -691,7 +691,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Protocol,
-                message: "adapter".into(),
+                source: Box::new(std::io::Error::other("adapter")),
             },
             None,
             false,
@@ -736,7 +736,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Base64 {
                 field: "invoice.base64_data",
-                message: "bad".into(),
+                source: base64::DecodeError::InvalidByte(0, b'!'),
             },
             None,
             false,
@@ -812,7 +812,7 @@ fn the_retry_decision_depends_on_the_request_it_belongs_to() {
     for kind in [TransportKind::Timeout, TransportKind::Io] {
         let broken = Error::Transport {
             kind,
-            message: "mid-flight failure".into(),
+            source: Box::new(std::io::Error::other("mid-flight failure")),
         };
         assert!(!broken.is_retryable_for(false), "{kind}");
         assert!(broken.is_retryable_for(true), "{kind}");
@@ -820,7 +820,7 @@ fn the_retry_decision_depends_on_the_request_it_belongs_to() {
 
     let refused = Error::Transport {
         kind: TransportKind::Connect,
-        message: "dns".into(),
+        source: Box::new(std::io::Error::other("dns")),
     };
     assert!(refused.is_retryable_for(false), "nothing was written");
     assert!(refused.is_retryable_for(true));

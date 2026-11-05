@@ -62,7 +62,7 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
         },
         Error::Transport {
             kind,
-            message: text.into(),
+            source: Box::new(std::io::Error::other(text)),
         },
         Error::Json {
             source: serde_json::Error::io(std::io::Error::from(std::io::ErrorKind::InvalidData)),
@@ -82,7 +82,7 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
         },
         Error::Base64 {
             field: "invoice.base64_data",
-            message: text.into(),
+            source: base64::DecodeError::InvalidByte(0, b'!'),
         },
         Error::Utf8 {
             field: "journal.csv_base64",
@@ -653,7 +653,7 @@ fn arbitrary_errors(kind: TransportKind, status: u16, retry_after: Option<Durati
         Error::RateLimited { retry_after },
         Error::Transport {
             kind,
-            message: String::new(),
+            source: Box::new(std::io::Error::other("")),
         },
         Error::NotFound {
             message: String::new(),
