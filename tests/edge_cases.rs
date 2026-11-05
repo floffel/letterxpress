@@ -1079,9 +1079,37 @@ fn the_base_url_must_be_https_without_userinfo() {
         "https://api.letterxpress.de/v3?x=1",
         "https://api.letterxpress.de/v3#frag",
         "https://",
+        "https:///v3",
+        "https://:8443",
+        "https:////",
+        "https:////v3",
+        "https://./v3",
+        "https://api.letterxpress.de:65536/v3",
+        "https://api.letterxpress.de:not-a-port/v3",
         "https://api.letterxpress .de/v3",
     ] {
-        assert!(client.clone().with_base_url(bad).is_err(), "{bad:?}");
+        let error = client
+            .clone()
+            .with_base_url(bad)
+            .expect_err("an invalid base URL must be refused");
+        assert!(
+            matches!(
+                error,
+                Error::Validation {
+                    field: "base_url",
+                    ..
+                }
+            ),
+            "{bad:?}: {error:?}"
+        );
+    }
+    for good in [
+        "https://a",
+        "https://api.letterxpress.de:65535/v3",
+        "https://[::1]:65535/v3",
+        "HTTPS://api.letterxpress.de/v3",
+    ] {
+        assert!(client.clone().with_base_url(good).is_ok(), "{good:?}");
     }
     assert_eq!(
         client
