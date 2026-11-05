@@ -6,8 +6,8 @@
 //! unknown enum values survive as `Other(String)`. Nothing in here can fail on
 //! a provider that adds a field.
 //!
-//! Two kinds of value refuse instead of defaulting, because defaulting them
-//! would misreport money or volume:
+//! Three things refuse instead of defaulting, because defaulting them would
+//! misreport what the provider billed:
 //!
 //! * A flag (`c4`, `bank_form`): a value nobody can read — `"y"`, `"on"`, a
 //!   nested object — is a decode error, not a silent `false`. Numbers and their
@@ -17,6 +17,10 @@
 //!   job with more than [`MAX_JOB_ITEMS`] items, are refused at the boundary.
 //!   Every decoded job therefore sums to a page total that fits a `u32`, which
 //!   is what keeps [`PrintJob::pages`] arithmetic sound.
+//! * A price echo without a `specification`: there is no honest
+//!   [`PriceEcho`] to build, and "zero pages, nothing registered" is a
+//!   statement about the price that nobody made. See
+//!   [`PriceEcho::from_envelope`].
 //!
 //! ```
 //! use letterxpress::PrintJob;
@@ -1474,6 +1478,77 @@ impl Journal {
 /// assert!(refused.is_err());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
+///
+/// `registered` is the one field the provider echoes in either of two places:
+/// inside `specification` and next to it. The letter-level value wins when it
+/// carries a code, and the priced value survives when it does not — an absent
+/// key, `null` or an empty string is "not supplied", never "not registered":
+///
+/// ```
+/// use letterxpress::{PriceEcho, Registered};
+///
+/// // Echoed only inside the specification: that is the value that was priced.
+/// let inside = PriceEcho::from_envelope(&serde_json::json!({
+///     "specification": {"pages": 1, "registered": "r2"},
+/// }))?;
+/// assert_eq!(inside.registered, Some(Registered::Einschreiben));
+///
+/// // Both places say something: the letter-level code is the priced one.
+/// let both = PriceEcho::from_envelope(&serde_json::json!({
+///     "specification": {"pages": 1, "registered": "r1"},
+///     "registered": "r2",
+/// }))?;
+/// assert_eq!(both.registered, Some(Registered::Einschreiben));
+///
+/// // The letter level is silent, so it must not erase the priced code.
+/// for silent in [serde_json::Value::Null, serde_json::json!("")] {
+///     let kept = PriceEcho::from_envelope(&serde_json::json!({
+///         "specification": {"pages": 1, "registered": "r2"},
+///         "registered": silent,
+///     }))?;
+///     assert_eq!(kept.registered, Some(Registered::Einschreiben));
+/// }
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+///
+/// A code that arrives as a number is not dropped either: it goes through the
+/// same [`Registered::from_wire`] path as a string, so it is carried verbatim
+/// like any other code this crate does not model.
+///
+/// ```
+/// use letterxpress::{PriceEcho, Registered};
+///
+/// let echo = PriceEcho::from_envelope(&serde_json::json!({
+///     "specification": {"pages": 1},
+///     "registered": 2,
+/// }))?;
+/// assert_eq!(echo.registered, Some(Registered::Other("2".into())));
+///
+/// // A value that cannot be a code at all is refused, not guessed at.
+/// let nested = PriceEcho::from_envelope(&serde_json::json!({
+///     "specification": {"pages": 1},
+///     "registered": {"code": "r2"},
+/// }));
+/// assert!(nested.is_err());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+///
+/// Without a `specification` there is no echo at all: the read is refused
+/// rather than answered with "zero pages, nothing registered", which would
+/// misreport a letter the provider did price.
+///
+/// ```
+/// use letterxpress::PriceEcho;
+///
+/// assert!(PriceEcho::from_envelope(&serde_json::json!({"registered": "r1"})).is_err());
+/// assert!(PriceEcho::from_envelope(&serde_json::json!({"specification": null})).is_err());
+///
+/// // The emptiest honest echo: a specification that says nothing.
+/// let empty = PriceEcho::from_envelope(&serde_json::json!({"specification": {}}))?;
+/// assert_eq!(empty.pages, 0);
+/// assert_eq!(empty.registered, None);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct PriceEcho {
     /// Pages that were priced, `0` to [`MAX_ITEM_PAGES`].
@@ -1519,22 +1594,48 @@ impl PriceEcho {
     /// assert_eq!(echo.pages, 2);
     /// # Ok::<(), serde_json::Error>(())
     /// ```
+    ///
     /// # Errors
     ///
-    /// [`Error`] when the payload cannot be decoded or the provider rejects the
-    /// call.
+    /// [`serde_json::Error`] when `letter` has no `specification` (or carries
+    /// `null` there) — an echo nobody can read is refused instead of invented —
+    /// when `specification` is not an object, when a flag inside it is
+    /// unreadable, or when the letter-level `registered` is a token that cannot
+    /// be a code (an object, an array).
     pub fn from_envelope(letter: &Value) -> Result<Self, serde_json::Error> {
-        let specification = letter.get("specification").cloned().unwrap_or(Value::Null);
-        let mut echo = if specification.is_null() {
-            Self::default()
-        } else {
-            serde_json::from_value::<Self>(specification)?
-        };
-        echo.registered = letter
-            .get("registered")
-            .and_then(Value::as_str)
-            .map(Registered::from_wire);
+        let specification = letter
+            .get("specification")
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| de::Error::missing_field("specification"))?;
+        let mut echo = <Self as Deserialize>::deserialize(specification)?;
+        // The provider echoes the flag next to `specification` as well. Only a
+        // value that carries a code may replace the priced one.
+        if let Some(registered) = letter_registered(letter.get("registered"))? {
+            echo.registered = Some(registered);
+        }
         Ok(echo)
+    }
+}
+
+/// The letter-level `registered` echo, when the provider sent one.
+///
+/// The flag lives either inside `specification` or next to it, so this is the
+/// half that must stay silent about the half it cannot see: an absent key,
+/// `null`, an empty string and a string of blanks all mean "not supplied" and
+/// leave whatever the specification priced untouched. Everything else goes
+/// through [`Registered`]'s own decoding rule, which reads a number as its
+/// string form and carries an unknown code verbatim; a token that is not a
+/// code at all fails the deserialiser instead of being reported as
+/// "not registered".
+fn letter_registered(value: Option<&Value>) -> Result<Option<Registered>, serde_json::Error> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    match <Registered as Deserialize>::deserialize(value)? {
+        // `""` is the spelling `Registered` uses for a value that is there but
+        // names nothing; it is "not supplied", not a code.
+        Registered::Other(raw) if raw.is_empty() => Ok(None),
+        registered => Ok(Some(registered)),
     }
 }
 
@@ -1548,6 +1649,34 @@ impl PriceEcho {
 /// )?;
 /// assert_eq!(price.price.cents(), 499);
 /// assert_eq!(price.echo.as_ref().unwrap().pages, 1);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+///
+/// An echo is built only from a `letter` **object**; `null`, a string or an
+/// array carries nothing to echo and is ignored, so a body this crate cannot
+/// place never costs the caller the price. A `letter` object whose
+/// `specification` is missing is different — that is a price with a hole where
+/// the letter should be, and it fails the decode instead of being reported as
+/// "zero pages, nothing registered" (see [`PriceEcho::from_envelope`]):
+///
+/// ```
+/// use letterxpress::Price;
+///
+/// let bare: Price = serde_json::from_str(r#"{"price":1.0}"#)?;
+/// assert!(bare.echo.is_none());
+///
+/// let ignored: Price = serde_json::from_str(r#"{"price":1.0,"letter":"nope"}"#)?;
+/// assert!(ignored.echo.is_none());
+///
+/// let hole = serde_json::from_str::<Price>(r#"{"price":1.0,"letter":{"registered":"r1"}}"#);
+/// assert!(hole.is_err(), "no specification is not an echo");
+///
+/// let also_hole = serde_json::from_str::<Price>(r#"{"price":1.0,"letter":{}}"#);
+/// assert!(also_hole.is_err(), "no specification is not an echo");
+///
+/// // One empty object is enough to say "a letter was priced, nothing set".
+/// let empty: Price = serde_json::from_str(r#"{"price":1.0,"letter":{"specification":{}}}"#)?;
+/// assert_eq!(empty.echo.as_ref().map(|echo| echo.pages), Some(0));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1569,8 +1698,11 @@ impl<'de> Deserialize<'de> for Price {
         }
 
         let raw = Raw::deserialize(deserializer)?;
+        // Only an object can hold a specification. Anything else is not an
+        // echo, and refusing the whole price over it would cost the caller the
+        // number that is actually useful.
         let echo = match raw.letter {
-            Some(value) if !value.is_null() => {
+            Some(value) if value.is_object() => {
                 Some(PriceEcho::from_envelope(&value).map_err(de::Error::custom)?)
             }
             _ => None,
@@ -1834,5 +1966,171 @@ mod tests {
             ..PrintJob::default()
         };
         assert_eq!(job.pages(), u32::MAX, "saturated, not wrapped to 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // The price echo: `registered` from either place, and only from a
+    // specification that exists.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_letter_level_registered_code_is_the_one_that_wins() {
+        let both = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 1, "registered": "r1"},
+            "registered": "r2",
+        }))
+        .unwrap();
+        assert_eq!(both.registered, Some(Registered::Einschreiben));
+
+        // The same in the other order, so the answer is the letter level and
+        // not whichever branch happened to run last.
+        let both = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 1, "registered": "r2"},
+            "registered": "r1",
+        }))
+        .unwrap();
+        assert_eq!(both.registered, Some(Registered::EinschreibenEinwurf));
+    }
+
+    #[test]
+    fn a_silent_letter_level_registered_keeps_the_priced_one() {
+        // The bug: every one of these used to overwrite the specification's
+        // `r2` with `None`, so a registered letter was echoed as unregistered.
+        for silent in [json!(null), json!(""), json!("   "), json!("\t\n")] {
+            let echo = PriceEcho::from_envelope(&json!({
+                "specification": {"pages": 2, "registered": "r2"},
+                "registered": silent.clone(),
+            }))
+            .unwrap();
+            assert_eq!(
+                echo.registered,
+                Some(Registered::Einschreiben),
+                "{silent} is not a code"
+            );
+        }
+
+        // An absent key is the same state as a null one.
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 2, "registered": "r2"},
+        }))
+        .unwrap();
+        assert_eq!(echo.registered, Some(Registered::Einschreiben));
+
+        // … and a letter level that is silent about a *silent* specification
+        // stays `None` instead of inventing a code.
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 2},
+            "registered": null,
+        }))
+        .unwrap();
+        assert_eq!(echo.registered, None);
+    }
+
+    #[test]
+    fn a_non_string_registered_echo_is_carried_instead_of_dropped() {
+        // Only the string form used to be read; a number was thrown away.
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 1},
+            "registered": 2,
+        }))
+        .unwrap();
+        assert_eq!(echo.registered, Some(Registered::Other("2".into())));
+
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 1},
+            "registered": "R2",
+        }))
+        .unwrap();
+        assert_eq!(echo.registered, Some(Registered::Einschreiben));
+
+        // An unknown string is carried verbatim, like any other wire code.
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {"pages": 1},
+            "registered": " r7 ",
+        }))
+        .unwrap();
+        assert_eq!(echo.registered, Some(Registered::Other("r7".into())));
+    }
+
+    #[test]
+    fn a_registered_token_that_is_no_code_is_refused() {
+        // Just outside the rule: a nested object or an array is not a code, and
+        // must not be read as "not registered".
+        for broken in [json!({"code": "r2"}), json!(["r2"]), json!([1, 2])] {
+            let result = PriceEcho::from_envelope(&json!({
+                "specification": {"pages": 1, "registered": "r2"},
+                "registered": broken.clone(),
+            }));
+            assert!(result.is_err(), "{broken} is not a code");
+        }
+    }
+
+    #[test]
+    fn a_price_echo_needs_a_specification() {
+        // Missing, null and a non-object specification have nothing to echo.
+        for letter in [
+            json!({}),
+            json!({"registered": "r1"}),
+            json!({"specification": null}),
+            json!({"specification": 5}),
+            json!({"specification": "nope"}),
+        ] {
+            let result = PriceEcho::from_envelope(&letter);
+            assert!(result.is_err(), "{letter} has no specification");
+        }
+
+        // The other side of the boundary: an empty object *is* a specification,
+        // and every field of the echo is then honestly "nothing".
+        let empty = PriceEcho::from_envelope(&json!({"specification": {}})).unwrap();
+        assert_eq!(empty, PriceEcho::default());
+
+        // A non-object `letter` can never carry one either.
+        assert!(PriceEcho::from_envelope(&json!("specification")).is_err());
+        assert!(PriceEcho::from_envelope(&json!([{"specification": {}}])).is_err());
+    }
+
+    #[test]
+    fn the_rest_of_the_echo_is_read_from_the_specification() {
+        let echo = PriceEcho::from_envelope(&json!({
+            "specification": {
+                "pages": 3,
+                "color": "1",
+                "mode": "duplex",
+                "shipping": "international",
+                "email_option": "maildirect",
+                "c4": true,
+            },
+            "registered": "r1",
+        }))
+        .unwrap();
+        assert_eq!(echo.pages, 3);
+        assert_eq!(echo.color, Some(Color::BlackAndWhite));
+        assert_eq!(echo.mode, Some(PrintMode::Duplex));
+        assert_eq!(echo.shipping, Some(Shipping::International));
+        assert_eq!(echo.email_option, Some(EmailOption::MailDirect));
+        assert!(echo.c4);
+        assert_eq!(echo.registered, Some(Registered::EinschreibenEinwurf));
+    }
+
+    #[test]
+    fn a_price_without_a_letter_has_no_echo_and_a_price_with_a_hole_is_refused() {
+        let bare: Price = serde_json::from_str(r#"{"price": 1.25}"#).unwrap();
+        assert_eq!(bare.price.cents(), 125);
+        assert_eq!(bare.echo, None);
+
+        for ignored in [json!(null), json!("letter"), json!([1])] {
+            let price: Price = serde_json::from_value(json!({"price": 1.0, "letter": ignored}))
+                .expect("a `letter` that is not an object is not an echo");
+            assert_eq!(price.echo, None);
+        }
+
+        assert!(
+            serde_json::from_value::<Price>(json!({"price": 1.0, "letter": {}})).is_err(),
+            "a letter object without a specification is not an echo"
+        );
+
+        let echoed: Price =
+            serde_json::from_value(json!({"price": 1.0, "letter": {"specification": {}}})).unwrap();
+        assert_eq!(echoed.echo, Some(PriceEcho::default()));
     }
 }

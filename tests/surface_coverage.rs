@@ -486,9 +486,17 @@ fn email_job_page_accepts_the_three_documented_shapes() {
 
 #[test]
 fn price_echo_and_invoice_documents_decode_their_payloads() {
-    let echo = PriceEcho::from_envelope(&json!({"registered": "r2"})).unwrap();
+    let echo = PriceEcho::from_envelope(&json!({
+        "specification": {"pages": 1, "registered": "r1"},
+        "registered": "r2",
+    }))
+    .unwrap();
     assert_eq!(echo.registered, Some(Registered::Einschreiben));
-    assert_eq!(echo.pages, 0);
+    assert_eq!(echo.pages, 1);
+
+    // No specification is no echo: the read is refused instead of answering
+    // "zero pages, nothing registered".
+    assert!(PriceEcho::from_envelope(&json!({"registered": "r2"})).is_err());
 
     let price: Price = serde_json::from_value(json!({"price": 1.25})).unwrap();
     assert_eq!(price.price.cents(), 125);
@@ -500,6 +508,7 @@ fn price_echo_and_invoice_documents_decode_their_payloads() {
             .is_err()
     );
     assert!(serde_json::from_value::<Price>(json!({"letter": "nope"})).is_ok());
+    assert!(serde_json::from_value::<Price>(json!({"letter": {"registered": "r2"}})).is_err());
 
     let document: InvoiceDocument =
         serde_json::from_value(json!({"id": 1, "base64_data": "JVBERi0xLjQK"})).unwrap();
