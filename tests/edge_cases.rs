@@ -202,18 +202,101 @@ async fn rate_limit_without_a_retry_after_header_still_maps() {
 }
 
 #[tokio::test]
-async fn an_unfollowed_redirect_is_reported_as_an_unexpected_shape() {
-    let client = client_with(vec![Response::new(
-        302,
-        [(
-            "Location".to_string(),
-            "https://elsewhere.test/".to_string(),
-        )],
-        Vec::new(),
-    )]);
-    let error = client.balance().await.expect_err("must fail");
-    assert!(matches!(error, Error::UnexpectedShape { .. }));
-    assert!(error.to_string().contains("302"));
+async fn an_unfollowed_informational_or_redirect_on_a_read_stays_terminal() {
+    for status in [100, 199, 300, 399] {
+        let client = client_with(vec![Response::new(
+            status,
+            [(
+                "Location".to_string(),
+                "https://elsewhere.test/".to_string(),
+            )],
+            Vec::new(),
+        )]);
+        let error = client.balance().await.expect_err("must fail");
+        assert!(
+            matches!(&error, Error::UnexpectedStatus { status: actual, .. } if *actual == status),
+            "{status} produced {error:?}"
+        );
+        assert_eq!(error.status(), Some(status));
+        assert!(!error.is_ambiguous(), "{status} produced {error:?}");
+        assert!(!error.is_retryable(), "{status} produced {error:?}");
+        assert!(error.to_string().contains(&status.to_string()));
+    }
+}
+
+#[tokio::test]
+async fn an_unfollowed_informational_or_redirect_answer_to_a_submit_is_ambiguous() {
+    for status in [100, 199, 300, 399] {
+        let client = client_with(vec![Response::new(
+            status,
+            [(
+                "Location".to_string(),
+                "https://elsewhere.test/".to_string(),
+            )],
+            Vec::new(),
+        )]);
+        let error = client
+            .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+            .await
+            .expect_err("must fail");
+        assert!(error.is_ambiguous(), "{status} produced {error:?}");
+        assert!(!error.is_retryable(), "{status} produced {error:?}");
+        assert!(
+            matches!(
+                &error,
+                Error::Ambiguous { message } if message.contains(&format!("http {status}"))
+            ),
+            "{status} produced {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unfollowed_informational_or_redirect_answer_to_an_email_submit_is_ambiguous() {
+    let letter = Letter::new(&pdf())
+        .expect("letter")
+        .with_email(
+            EmailDelivery::new("kunde@example.de", EmailOption::MailSecure).expect("delivery"),
+        )
+        .expect("email");
+    for status in [100, 199, 300, 399] {
+        let client = client_with(vec![Response::new(
+            status,
+            [(
+                "Location".to_string(),
+                "https://elsewhere.test/".to_string(),
+            )],
+            Vec::new(),
+        )]);
+        let error = client
+            .submit_email_job(&letter)
+            .await
+            .expect_err("must fail");
+        assert!(error.is_ambiguous(), "{status} produced {error:?}");
+        assert!(!error.is_retryable(), "{status} produced {error:?}");
+        assert!(
+            matches!(
+                &error,
+                Error::Ambiguous { message } if message.contains(&format!("http {status}"))
+            ),
+            "{status} produced {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_submit_2xx_status_boundary_still_decodes() {
+    for status in [200, 299] {
+        let client = client_with(vec![Response::json_response(
+            status,
+            fixture("printjob_create.json"),
+        )]);
+        let job = client
+            .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+            .await
+            .unwrap_or_else(|error| panic!("{status}: {error}"));
+        assert_eq!(job.id.as_str(), "6035143", "{status}");
+    }
 }
 
 #[tokio::test]
