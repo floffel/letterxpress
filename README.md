@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_notice("antrag-4711")?;
 
     let job = client.submit_print_job(&letter).await?;
-    println!("job {} totals {}", job.id, job.total());
+    println!("job {} totals {}", job.id, job.total()?);
     Ok(())
 }
 ```

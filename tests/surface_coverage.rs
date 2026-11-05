@@ -157,13 +157,22 @@ fn request_side_filters_are_closed_and_parseable() {
 fn money_supports_every_documented_shape() {
     assert!(Money::ZERO.euros().abs() < f64::EPSILON);
     assert!(Money::ZERO.is_zero());
-    assert!(!Money::from_cents(1).is_zero());
-    assert_eq!(Money::from(1.5), Money::from_euros(1.5));
-    assert_eq!((Money::from_cents(50) + Money::from_cents(25)).cents(), 75);
-    assert_eq!(Money::from_cents(1_000_000).to_string(), "10000.00");
+    assert!(!Money::from_cents(1).expect("valid").is_zero());
+    assert_eq!(
+        Money::from_cents(50)
+            .expect("valid")
+            .checked_add(Money::from_cents(25).expect("valid"))
+            .expect("sum")
+            .cents(),
+        75
+    );
+    assert_eq!(
+        Money::from_cents(1_000_000).expect("valid").to_string(),
+        "10000.00"
+    );
 
     assert_eq!(
-        serde_json::to_string(&Money::from_euros(0.68)).unwrap(),
+        serde_json::to_string(&Money::from_euros(0.68).unwrap()).unwrap(),
         "0.68"
     );
     assert_eq!(serde_json::from_str::<Money>("0.68").unwrap().cents(), 68);
@@ -176,7 +185,7 @@ fn money_supports_every_documented_shape() {
         68
     );
     assert_eq!(serde_json::from_str::<Money>("1").unwrap().cents(), 100);
-    assert_eq!(serde_json::from_str::<Money>("-1").unwrap().cents(), -100);
+    assert!(serde_json::from_str::<Money>("-1").is_err());
     assert_eq!(serde_json::from_str::<Money>("null").unwrap().cents(), 0);
     assert!(serde_json::from_str::<Money>("\"not money\"").is_err());
 }
@@ -376,15 +385,15 @@ fn job_models_expose_their_derived_totals() {
         items: vec![
             PrintItem {
                 pages: 2,
-                net: Money::from_cents(100),
-                vat: Money::from_cents(19),
+                net: Money::from_cents(100).unwrap(),
+                vat: Money::from_cents(19).unwrap(),
                 tracking_code: Some("RC1".into()),
                 ..PrintItem::default()
             },
             PrintItem {
                 pages: 3,
-                net: Money::from_cents(50),
-                vat: Money::from_cents(10),
+                net: Money::from_cents(50).unwrap(),
+                vat: Money::from_cents(10).unwrap(),
                 ..PrintItem::default()
             },
         ],
@@ -392,21 +401,21 @@ fn job_models_expose_their_derived_totals() {
     };
 
     assert_eq!(job.pages(), 5);
-    assert_eq!(job.net().cents(), 150);
-    assert_eq!(job.total().cents(), 179);
+    assert_eq!(job.net().expect("net").cents(), 150);
+    assert_eq!(job.total().expect("total").cents(), 179);
     assert_eq!(job.tracking_code(), Some("RC1"));
 
     let email = EmailJob {
-        net: Money::from_cents(5),
-        vat: Money::from_cents(1),
+        net: Money::from_cents(5).unwrap(),
+        vat: Money::from_cents(1).unwrap(),
         ..EmailJob::default()
     };
     assert_eq!(email.net().cents(), 5);
     assert_eq!(email.vat().cents(), 1);
-    assert_eq!(email.total().cents(), 6);
+    assert_eq!(email.total().expect("total").cents(), 6);
 
     let empty = EmailJob::default();
-    assert_eq!(empty.total().cents(), 0);
+    assert_eq!(empty.total().expect("total").cents(), 0);
     assert_eq!(PrintJob::default().tracking_code(), None);
 }
 
@@ -556,7 +565,7 @@ fn print_item_defaults_are_zero() {
     let item = PrintItem::default();
     assert_eq!(item.net(), Money::ZERO);
     assert_eq!(item.vat(), Money::ZERO);
-    assert_eq!(item.total(), Money::ZERO);
+    assert_eq!(item.total().expect("total"), Money::ZERO);
     assert_eq!(item.address, None);
     assert_eq!(item.status, JobStatus::Other(String::new()));
 }

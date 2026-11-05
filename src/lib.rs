@@ -32,7 +32,7 @@
 //!     .with_notice("antrag-4711")?;
 //!
 //! let job = client.submit_print_job(&letter).await?;
-//! println!("job {} at {}", job.id, job.total());
+//! println!("job {} at {}", job.id, job.total()?);
 //! # Ok(())
 //! # }
 //! ```
@@ -146,7 +146,7 @@ pub use letter::{
     MAX_BANK_AMOUNT_CHARS, MAX_BIC_CHARS, MAX_FILENAME_CHARS, MAX_IBAN_CHARS, MAX_NOTICE_CHARS,
     MAX_PAYEE_CHARS, MAX_PDF_BYTES, MAX_PURPOSE_CHARS,
 };
-pub use money::Money;
+pub use money::{Money, MoneyError};
 pub use response::{parse_envelope, Envelope};
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;

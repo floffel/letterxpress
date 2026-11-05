@@ -8,7 +8,8 @@ use common::{client_with, fixture, pdf};
 use letterxpress::transport::{MockTransport, Response, Transport};
 use letterxpress::{
     Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus, Letter, Mode,
-    Money, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS, MAX_PDF_BYTES,
+    Money, MoneyError, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
+    MAX_PDF_BYTES,
 };
 
 fn client_for(status: u16, body: &str) -> Client<MockTransport> {
@@ -401,7 +402,7 @@ async fn unicode_addresses_survive_unchanged() {
         job.filename_original.as_deref(),
         Some("Straßenfest 会议.pdf")
     );
-    assert_eq!(job.total().cents(), 250);
+    assert_eq!(job.total().expect("total").cents(), 250);
 }
 
 #[tokio::test]
@@ -1166,20 +1167,65 @@ fn a_hand_built_page_total_saturates_instead_of_wrapping() {
 
 #[test]
 fn money_helpers_are_stable_at_the_boundaries() {
-    assert_eq!(Money::from_cents(0).cents(), 0);
-    assert_eq!(Money::from_cents(-1).cents(), -1);
-    assert_eq!(Money::from_euros(f64::NAN).cents(), 0, "no panic on NaN");
+    assert_eq!(Money::from_cents(0).map(Money::cents), Ok(0));
+    assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
+    assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
     assert_eq!(
-        Money::from_euros(f64::INFINITY).cents(),
-        i64::MAX,
-        "saturating"
+        Money::from_cents(i64::MAX)
+            .expect("max")
+            .checked_add(Money::from_cents(1).expect("one")),
+        Err(MoneyError::OutOfRange)
+    );
+
+    assert_eq!(Money::from_euros(f64::NAN), Err(MoneyError::NotFinite));
+    assert_eq!(Money::from_euros(f64::INFINITY), Err(MoneyError::NotFinite));
+    assert_eq!(Money::from_euros(-0.01), Err(MoneyError::Negative));
+    assert_eq!(Money::from_euros(f64::MAX), Err(MoneyError::OutOfRange));
+    assert_eq!(
+        Money::from_euros(4.999).map(Money::cents),
+        Ok(500),
+        "rounds half-up"
     );
     assert_eq!(
-        Money::from_euros(0.005).cents(),
-        1,
-        "rounds half away from zero"
+        Money::from_euros(1_000_000.0).expect("valid").to_string(),
+        "1000000.00"
     );
-    assert_eq!(Money::from_euros(1_000_000.0).to_string(), "1000000.00");
+
+    let sum = Money::from_euros(0.1)
+        .expect("0.1")
+        .checked_add(Money::from_euros(0.2).expect("0.2"))
+        .expect("sum");
+    assert_eq!(sum.cents(), 30, "0.1 + 0.2 is exact in cents");
+}
+
+#[test]
+fn money_deserialisation_rejects_non_finite_negative_and_overflowing_values() {
+    for bad in [
+        "NaN",
+        "inf",
+        "-inf",
+        "1e400",
+        "-0.01",
+        "9223372036854775808",
+    ] {
+        assert!(
+            serde_json::from_str::<Money>(&format!("\"{bad}\"")).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(serde_json::from_str::<Money>("-1").is_err());
+    assert!(serde_json::from_str::<Money>("1e400").is_err());
+    assert!(serde_json::from_str::<Money>(&i64::MAX.to_string()).is_err());
+    assert_eq!(serde_json::from_str::<Money>("0").expect("zero").cents(), 0);
+}
+
+#[test]
+fn money_deserialisation_keeps_unknown_enclosing_fields_permissive() {
+    let balance: letterxpress::Balance = serde_json::from_str(
+        r#"{"balance":"54.89","currency":"EUR","future_field":{"nested":true}}"#,
+    )
+    .expect("unknown fields stay ignored");
+    assert_eq!(balance.cents(), 5_489);
 }
 
 #[test]
