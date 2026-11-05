@@ -68,7 +68,10 @@ impl TransportKind {
     /// ```
     #[must_use]
     pub fn is_retryable(self) -> bool {
-        !matches!(self, Self::Protocol)
+        match self {
+            Self::Connect | Self::Timeout | Self::Io => true,
+            Self::Protocol => false,
+        }
     }
 }
 
@@ -808,6 +811,74 @@ mod tests {
             VARIANTS.len() + 3,
             "the four `Transport` kinds are the only repeated variant"
         );
+    }
+
+    /// Every [`TransportKind`], listed so that a new kind cannot stay out of
+    /// the documented table: [`kind_name`] matches without a wildcard arm, so
+    /// the build breaks first.
+    const TRANSPORT_KINDS: &[TransportKind] = &[
+        TransportKind::Connect,
+        TransportKind::Timeout,
+        TransportKind::Io,
+        TransportKind::Protocol,
+    ];
+
+    /// The `TransportKind` name the table's second column spells, matched with
+    /// **no** wildcard arm.
+    fn kind_name(kind: TransportKind) -> &'static str {
+        match kind {
+            TransportKind::Connect => "Connect",
+            TransportKind::Timeout => "Timeout",
+            TransportKind::Io => "Io",
+            TransportKind::Protocol => "Protocol",
+        }
+    }
+
+    /// The four `Transport` rows are one per kind, labelled exactly as the
+    /// table spells them, and each one answers like the kind it classifies.
+    /// `TransportKind` is `#[non_exhaustive]` as well, so this is the check
+    /// that would catch a kind added without a row.
+    #[test]
+    fn every_transport_kind_has_exactly_one_documented_row() {
+        let rows = table();
+        let transport: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(&row.error, Error::Transport { .. }))
+            .collect();
+        assert_eq!(
+            transport.len(),
+            TRANSPORT_KINDS.len(),
+            "one `Transport` row per kind, and no kind twice"
+        );
+
+        for kind in TRANSPORT_KINDS {
+            let label = format!("[`Error::Transport`] / `{}`", kind_name(*kind));
+            let matching: Vec<&Row> = transport
+                .iter()
+                .copied()
+                .filter(|row| row.label == label)
+                .collect();
+            assert_eq!(matching.len(), 1, "no single row spells `{label}`");
+            let row = &matching[0];
+
+            let sample = Error::Transport {
+                kind: *kind,
+                message: "sample".into(),
+            };
+            assert_eq!(sample.status(), documented_status(row), "`{label}`: status");
+            assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
+            assert_eq!(row.ambiguous, sample.is_ambiguous(), "`{label}`: ambiguous");
+            assert_eq!(
+                sample.to_string(),
+                format!("transport error ({kind}): sample"),
+                "`{label}`: `Display` names the kind the table names"
+            );
+            assert_eq!(
+                kind.to_string(),
+                kind_name(*kind).to_ascii_lowercase(),
+                "`{label}`: `Display` spells the kind the way the row does"
+            );
+        }
     }
 
     /// The table is prose, so it too is asserted: every row above appears in
