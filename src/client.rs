@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
+use url::Url;
 
 use crate::letter::validate_email;
 use crate::response::{parse_envelope, Envelope};
@@ -43,6 +44,20 @@ use crate::{Error, Result};
 
 /// The documented base URL (p. 6 of the v3 documentation).
 pub const DEFAULT_BASE_URL: &str = "https://api.letterxpress.de/v3";
+
+/// The authority component of an `https://` URL, before any path, query or
+/// fragment. The scheme comparison is ASCII case-insensitive.
+fn base_url_authority(url: &str) -> Option<&str> {
+    const SCHEME: &str = "https://";
+
+    let scheme = url.get(..SCHEME.len())?;
+    if !scheme.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+    let rest = url.get(SCHEME.len()..)?;
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
 
 /// Documented rate limit: 120 requests per minute (p. 3).
 ///
@@ -107,10 +122,11 @@ impl<T> Client<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] unless the URL is `https://`, has no userinfo
-    /// (`user@host`), no query string and no fragment. Credentials are sent to
-    /// this host on every call, so a plaintext or ambiguous URL is refused
-    /// rather than sanitised.
+    /// [`Error::Validation`] unless the URL is an absolute `https://` URL with
+    /// a non-empty host and a valid port, no userinfo (`user@host`), no query
+    /// string and no fragment. The scheme is matched case-insensitively, as URL
+    /// schemes are. Credentials are sent to this host on every call, so a
+    /// plaintext or ambiguous URL is refused rather than sanitised.
     ///
     /// ```
     /// use letterxpress::{Client, Credentials, Mode};
@@ -119,36 +135,53 @@ impl<T> Client<T> {
     /// let client = Client::new(MockTransport::default(), Credentials::new("u", "k", Mode::Test)?);
     /// assert!(client.clone().with_base_url("http://api.letterxpress.de/v3").is_err());
     /// assert!(client.clone().with_base_url("https://user@api.letterxpress.de/v3").is_err());
+    /// assert!(client.clone().with_base_url("https:///v3").is_err());
+    /// assert!(client.clone().with_base_url("https://api.letterxpress.de:65536/v3").is_err());
+    /// assert!(client.clone().with_base_url("HTTPS://api.letterxpress.de/v3").is_ok());
+    /// assert!(client.clone().with_base_url("https://api.letterxpress.de:65535/v3").is_ok());
     /// assert!(client.with_base_url("https://api.letterxpress.de/v3/").is_ok());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Result<Self> {
         let base_url = base_url.into();
         let trimmed = base_url.trim().trim_end_matches('/');
-        if !trimmed.starts_with("https://") {
+        if trimmed.chars().any(char::is_whitespace) {
+            return Err(Error::invalid("base_url", "must not contain whitespace"));
+        }
+        let parsed = Url::parse(trimmed).map_err(|error| {
+            Error::invalid(
+                "base_url",
+                format!("must be a valid https URL with a host and valid port: {error}"),
+            )
+        })?;
+        if parsed.scheme() != "https" {
             return Err(Error::invalid(
                 "base_url",
                 "must start with https:// (credentials travel in every body)",
             ));
         }
-        let host_and_path = &trimmed["https://".len()..];
-        if host_and_path.is_empty() {
+        if parsed
+            .host_str()
+            .is_none_or(|host| host.trim_matches('.').is_empty())
+        {
             return Err(Error::invalid("base_url", "must name a host"));
         }
-        if host_and_path.contains('@') {
+        let authority = base_url_authority(trimmed)
+            .ok_or_else(|| Error::invalid("base_url", "must name a host"))?;
+        if authority.is_empty() {
+            return Err(Error::invalid("base_url", "must name a host"));
+        }
+        if authority.contains('@') {
             return Err(Error::invalid(
                 "base_url",
                 "must not contain userinfo (credentials belong in Credentials)",
             ));
         }
-        if host_and_path.contains('?') || host_and_path.contains('#') {
+        if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(Error::invalid(
                 "base_url",
                 "must not contain a query string or fragment",
             ));
-        }
-        if host_and_path.chars().any(char::is_whitespace) {
-            return Err(Error::invalid("base_url", "must not contain whitespace"));
         }
         self.base_url = trimmed.to_string();
         Ok(self)
@@ -1487,12 +1520,31 @@ fn decode_submitted<D: DeserializeOwned>(endpoint: &'static str, envelope: Envel
 mod tests {
     use super::*;
     use crate::transport::{MockTransport, Response};
+    use proptest::prelude::*;
 
     fn client() -> Client<MockTransport> {
         Client::new(
             MockTransport::default(),
             Credentials::new("u", "k", Mode::Test).expect("credentials"),
         )
+    }
+
+    proptest! {
+        #[test]
+        fn base_url_authority_stops_before_the_path(
+            host in "[a-z][a-z0-9.-]{0,62}",
+            path in "[A-Za-z0-9._~/-]{0,64}",
+        ) {
+            let url = format!("HTTPS://{host}/{path}");
+            prop_assert_eq!(base_url_authority(&url), Some(host.as_str()));
+        }
+
+        #[test]
+        fn base_url_authority_never_panics(text in ".*") {
+            if let Some(authority) = base_url_authority(&text) {
+                prop_assert!(text.contains(authority));
+            }
+        }
     }
 
     #[test]
@@ -1556,9 +1608,49 @@ mod tests {
     }
 
     #[test]
-    fn a_hostless_https_url_is_refused() {
-        assert!(client().with_base_url("https://").is_err());
-        assert!(client().with_base_url("   ").is_err());
+    fn a_base_url_requires_a_host_and_a_valid_port() {
+        for rejected in [
+            "https://",
+            "   ",
+            "https:///v3",
+            "https://:8443",
+            "https:////",
+            "https:////v3",
+            "https://./v3",
+            "https://api.letterxpress.de:65536/v3",
+            "https://api.letterxpress.de:not-a-port/v3",
+            "https://api.letterxpress.de:999999999999999999999/v3",
+            "HTTPS:///v3",
+        ] {
+            let error = client()
+                .with_base_url(rejected)
+                .expect_err("an invalid base URL must be refused");
+            assert!(
+                matches!(
+                    error,
+                    Error::Validation {
+                        field: "base_url",
+                        ..
+                    }
+                ),
+                "{rejected:?}: {error:?}"
+            );
+        }
+
+        for accepted in [
+            "https://a",
+            "https://api.letterxpress.de/v3",
+            "https://api.letterxpress.de:443/v3",
+            "https://api.letterxpress.de:65535/v3",
+            "https://[::1]:65535/v3",
+            "HTTPS://api.letterxpress.de/v3",
+            "hTtPs://api.letterxpress.de/v3",
+        ] {
+            assert!(
+                client().with_base_url(accepted).is_ok(),
+                "{accepted:?} must be accepted"
+            );
+        }
     }
 
     #[test]
