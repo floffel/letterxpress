@@ -32,8 +32,8 @@
 //!     "some_future_field": {"nested": true}
 //! }"#)?;
 //! assert_eq!(job.id.as_str(), "6035138");
-//! assert_eq!(job.items[0].total().cents(), 80);
-//! # Ok::<(), serde_json::Error>(())
+//! assert_eq!(job.items[0].total()?.cents(), 80);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use std::fmt;
@@ -43,7 +43,9 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::{Color, EmailOption, Error, JobStatus, Money, PrintMode, Registered, Shipping};
+use crate::{
+    Color, EmailOption, Error, JobStatus, Money, MoneyError, PrintMode, Registered, Shipping,
+};
 
 /// Generates a string-backed identifier that accepts numbers and strings.
 macro_rules! record_id {
@@ -521,8 +523,8 @@ fn de_items<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<PrintItem>
 /// )?;
 /// assert_eq!(item.net.cents(), 68);
 /// assert_eq!(item.vat.cents(), 13);
-/// assert_eq!(item.total().cents(), 81);
-/// # Ok::<(), serde_json::Error>(())
+/// assert_eq!(item.total()?.cents(), 81);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct PrintItem {
@@ -577,14 +579,22 @@ impl PrintItem {
 
     /// Net plus tax — what the provider actually charges.
     ///
+    /// # Errors
+    ///
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    ///
     /// ```
     /// use letterxpress::{Money, PrintItem};
     ///
-    /// let item = PrintItem { net: Money::from_euros(0.67), vat: Money::from_euros(0.13), ..PrintItem::default() };
-    /// assert_eq!(item.total().cents(), 80);
+    /// let item = PrintItem {
+    ///     net: Money::from_euros(0.67)?,
+    ///     vat: Money::from_euros(0.13)?,
+    ///     ..PrintItem::default()
+    /// };
+    /// assert_eq!(item.total()?.cents(), 80);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn total(&self) -> Money {
+    pub fn total(&self) -> Result<Money, MoneyError> {
         self.net.total(self.vat)
     }
 }
@@ -737,26 +747,34 @@ impl PrintJob {
 
     /// Net sum across items.
     ///
+    /// # Errors
+    ///
+    /// [`MoneyError::OutOfRange`] if a cent sum overflows.
+    ///
     /// ```
-    /// assert!(letterxpress::PrintJob::default().net().is_zero());
+    /// assert!(letterxpress::PrintJob::default().net()?.is_zero());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn net(&self) -> Money {
+    pub fn net(&self) -> Result<Money, MoneyError> {
         self.items
             .iter()
-            .fold(Money::ZERO, |sum, item| sum + item.net)
+            .try_fold(Money::ZERO, |sum, item| sum.checked_add(item.net))
     }
 
     /// Gross sum across items — the amount billed for this job.
     ///
+    /// # Errors
+    ///
+    /// [`MoneyError::OutOfRange`] if a cent sum overflows.
+    ///
     /// ```
-    /// assert!(letterxpress::PrintJob::default().total().is_zero());
+    /// assert!(letterxpress::PrintJob::default().total()?.is_zero());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn total(&self) -> Money {
+    pub fn total(&self) -> Result<Money, MoneyError> {
         self.items
             .iter()
-            .fold(Money::ZERO, |sum, item| sum + item.total())
+            .try_fold(Money::ZERO, |sum, item| sum.checked_add(item.total()?))
     }
 
     /// The first tracking code, when the job is registered mail.
@@ -792,8 +810,8 @@ impl PrintJob {
 ///         "amount":0.05,"vat":0.01,"status":"queue","subject":"Monats Rechnung"}"#,
 /// )?;
 /// assert_eq!(job.status, letterxpress::JobStatus::Queue);
-/// assert_eq!(job.total().cents(), 6);
-/// # Ok::<(), serde_json::Error>(())
+/// assert_eq!(job.total()?.cents(), 6);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct EmailJob {
@@ -866,11 +884,15 @@ impl EmailJob {
 
     /// Net plus tax.
     ///
+    /// # Errors
+    ///
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    ///
     /// ```
-    /// assert!(letterxpress::EmailJob::default().total().is_zero());
+    /// assert!(letterxpress::EmailJob::default().total()?.is_zero());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn total(&self) -> Money {
+    pub fn total(&self) -> Result<Money, MoneyError> {
         self.net.total(self.vat)
     }
 }
@@ -1253,20 +1275,21 @@ impl Balance {
 
 /// One ledger entry (`GET /v3/transactions`).
 ///
-/// Negative amounts are charges, positive amounts are top-ups.
+/// Amounts are nonnegative: negative ledger values are not a [`Money`] and are
+/// rejected at the decode boundary.
 ///
 /// ```
 /// use letterxpress::Transaction;
 ///
 /// let entry: Transaction = serde_json::from_str(
-///     r#"{"amount":-0.81,"currency":"EUR","description":"Schwarzweiß, Einseitig, National, 1 Seite","created_at":"2022-09-21 11:45:28"}"#,
+///     r#"{"amount":0.81,"currency":"EUR","description":"Schwarzweiß, Einseitig, National, 1 Seite","created_at":"2022-09-21 11:45:28"}"#,
 /// )?;
-/// assert_eq!(entry.amount.cents(), -81);
+/// assert_eq!(entry.amount.cents(), 81);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Transaction {
-    /// Signed amount: negative is a charge.
+    /// Nonnegative amount. A negative value fails decoding.
     #[serde(default)]
     pub amount: Money,
     /// Currency.
@@ -1305,9 +1328,9 @@ pub struct TransactionPage {
 /// use letterxpress::Invoice;
 ///
 /// let invoice: Invoice = serde_json::from_str(r#"{"id":25402,"amount":0.67,"vat":0.13,"invoice_date":"2020-05-31"}"#)?;
-/// assert_eq!(invoice.total().cents(), 80);
+/// assert_eq!(invoice.total()?.cents(), 80);
 /// assert_eq!(invoice.amount.cents(), 67);
-/// # Ok::<(), serde_json::Error>(())
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Invoice {
@@ -1327,14 +1350,22 @@ pub struct Invoice {
 impl Invoice {
     /// Net plus tax — the invoiced amount.
     ///
+    /// # Errors
+    ///
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    ///
     /// ```
     /// use letterxpress::{Invoice, Money};
     ///
-    /// let invoice = Invoice { amount: Money::from_euros(0.67), vat: Money::from_euros(0.13), ..Invoice::default() };
-    /// assert_eq!(invoice.total().cents(), 80);
+    /// let invoice = Invoice {
+    ///     amount: Money::from_euros(0.67)?,
+    ///     vat: Money::from_euros(0.13)?,
+    ///     ..Invoice::default()
+    /// };
+    /// assert_eq!(invoice.total()?.cents(), 80);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn total(&self) -> Money {
+    pub fn total(&self) -> Result<Money, MoneyError> {
         self.amount.total(self.vat)
     }
 }

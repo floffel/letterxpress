@@ -148,19 +148,19 @@ proptest! {
         }
     }
 
-    /// Money survives a trip through cents and back, for every plausible value.
+    /// Money survives a trip through cents and back, for every valid value.
     #[test]
-    fn cents_round_trip(cents in -100_000_000i64..100_000_000) {
-        prop_assert_eq!(Money::from_cents(cents).cents(), cents);
+    fn cents_round_trip(cents in 0i64..100_000_000) {
+        prop_assert_eq!(Money::from_cents(cents).map(Money::cents), Ok(cents));
     }
 
-    /// Net plus tax is the sum, in cents as in euro.
+    /// Net plus tax is the checked sum, in cents as in euro.
     #[test]
     fn totals_add_up(a in 0i64..100_000, b in 0i64..100_000) {
-        let net = Money::from_cents(a);
-        let vat = Money::from_cents(b);
-        prop_assert_eq!(net.total(vat).cents(), a + b);
-        prop_assert_eq!(net + vat, net.total(vat));
+        let net = Money::from_cents(a).expect("nonnegative");
+        let vat = Money::from_cents(b).expect("nonnegative");
+        prop_assert_eq!(net.total(vat).map(Money::cents), Ok(a + b));
+        prop_assert_eq!(net.checked_add(vat), net.total(vat));
     }
 
     /// Parsing a status and re-parsing its wire form is idempotent — including
@@ -231,11 +231,15 @@ proptest! {
             if job.status == JobStatus::Other(String::new()) {
                 prop_assert!(!job.is_terminal());
             }
-            prop_assert_eq!(job.total().cents(), job.net().cents() + job
-                .items
-                .iter()
-                .map(|item| item.vat.cents())
-                .sum::<i64>());
+            if let (Ok(total), Ok(net), Some(vat)) = (
+                job.total(),
+                job.net(),
+                job.items
+                    .iter()
+                    .try_fold(0i64, |sum, item| sum.checked_add(item.vat.cents())),
+            ) {
+                prop_assert_eq!(total.cents(), net.cents() + vat);
+            }
         }
         if let Ok(page) = serde_json::from_value::<letterxpress::PrintJobPage>(value.clone()) {
             prop_assert!(page.jobs.len() <= 1024);
