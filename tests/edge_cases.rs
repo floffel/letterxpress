@@ -20,7 +20,7 @@ fn client_for(status: u16, body: &str) -> Client<MockTransport> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn empty_success_body_is_a_missing_data_error() {
+async fn empty_success_body_has_no_data_but_a_required_payload_still_errors() {
     let client = client_with(vec![Response::json_response(200, "")]);
     let error = client.balance().await.expect_err("must fail");
     assert!(matches!(error, Error::MissingField { field: "data", .. }));
@@ -33,6 +33,40 @@ async fn whitespace_only_body_behaves_like_an_empty_one() {
         client.balance().await.expect_err("must fail"),
         Error::MissingField { .. }
     ));
+}
+
+#[tokio::test]
+async fn bodiless_deletes_succeed_for_empty_and_whitespace_bodies() {
+    for (status, body) in [(204, ""), (200, ""), (200, " \n\t")] {
+        let client = client_with(vec![Response::new(
+            status,
+            [("Content-Length".to_string(), body.len().to_string())],
+            body.as_bytes().to_vec(),
+        )]);
+        let deletion = client
+            .delete_print_job(&JobId::new("6035145").expect("id"))
+            .await
+            .expect("a bodiless 2xx is a successful deletion");
+        assert_eq!(deletion.message, "", "{status} {body:?}");
+    }
+}
+
+#[tokio::test]
+async fn bodiless_submits_are_ambiguous_not_terminal() {
+    for (status, body) in [(200, ""), (204, ""), (200, " \n\t")] {
+        let client = client_with(vec![Response::new(
+            status,
+            [("Content-Length".to_string(), body.len().to_string())],
+            body.as_bytes().to_vec(),
+        )]);
+        let error = client
+            .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+            .await
+            .expect_err("a submit without a decoded job is ambiguous");
+        assert!(error.is_ambiguous(), "{status} {body:?}: {error:?}");
+        assert!(!error.is_retryable(), "{status} {body:?}: {error:?}");
+        assert_eq!(error.status(), None, "{status} {body:?}: {error:?}");
+    }
 }
 
 #[tokio::test]

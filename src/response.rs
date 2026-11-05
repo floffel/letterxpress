@@ -58,11 +58,17 @@ pub struct Envelope {
 impl Envelope {
     /// The `data` payload, when the provider sent one.
     ///
+    /// A bodiless success (`204 No Content`, or `Content-Length: 0`) and a
+    /// literal `"data": null` have the same representation: no payload.
+    ///
     /// ```
     /// use letterxpress::transport::Response;
     ///
     /// let envelope = letterxpress::parse_envelope("GET /v3/balance", Response::json_response(200, r#"{"status":200,"data":null}"#))?;
     /// assert!(envelope.data().is_none());
+    ///
+    /// let empty = letterxpress::parse_envelope("DELETE /v3/printjobs/{id}", Response::new(204, std::iter::empty(), Vec::new()))?;
+    /// assert!(empty.data().is_none());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     #[must_use]
@@ -140,6 +146,10 @@ impl Envelope {
 /// [`Error::MethodNotAllowed`], [`Error::RateLimited`], [`Error::Rejected`],
 /// [`Error::Upstream`], [`Error::Json`] and [`Error::UnexpectedShape`].
 ///
+/// An empty or whitespace-only body is an envelope with no `data`, exactly like
+/// a literal `null` body. Endpoints that require a payload still report
+/// [`Error::MissingField`] from their own decoding step.
+///
 /// ```
 /// use letterxpress::transport::Response;
 ///
@@ -150,12 +160,15 @@ impl Envelope {
 /// let limited = Response::new(429, [("Retry-After".to_string(), "30".to_string())], Vec::new());
 /// let error = letterxpress::parse_envelope("POST /v3/printjobs", limited).unwrap_err();
 /// assert_eq!(error.status(), Some(429));
+///
+/// let empty = letterxpress::parse_envelope("DELETE /v3/printjobs/{id}", Response::new(204, std::iter::empty(), Vec::new()))?;
+/// assert!(empty.data().is_none());
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
 #[allow(clippy::needless_pass_by_value)]
 pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Envelope> {
     let http_status = response.status();
-    let body = parse_body(endpoint, http_status, &response)?;
+    let body = parse_body(http_status, &response)?;
     let message = body.as_ref().and_then(extract_message);
     let body_status = body
         .as_ref()
@@ -247,19 +260,11 @@ fn body_error(status: Option<u16>, message: Option<&str>) -> Option<Error> {
     }
 }
 
-/// Parses the body, tolerating an empty body and non-JSON error pages.
-fn parse_body(endpoint: &'static str, status: u16, response: &Response) -> Result<Option<Value>> {
+/// Parses the body, representing an empty body as no payload and tolerating
+/// non-JSON error pages.
+fn parse_body(status: u16, response: &Response) -> Result<Option<Value>> {
     if response.body().iter().all(u8::is_ascii_whitespace) {
-        // An empty body is only acceptable when the status already explains it;
-        // a 2xx without a body has nothing to decode.
-        return if (200..300).contains(&status) {
-            Err(Error::MissingField {
-                endpoint,
-                field: "data",
-            })
-        } else {
-            Ok(None)
-        };
+        return Ok(None);
     }
     match serde_json::from_slice::<Value>(response.body()) {
         Ok(Value::Null) => Ok(None),
@@ -392,16 +397,29 @@ mod tests {
     }
 
     #[test]
-    fn a_null_body_is_an_empty_answer() {
-        let response = Response::json_response(200, "null");
-        // A literal `null` body decodes to an envelope with nothing in it; a
-        // caller that needs `data` then gets a typed missing-field error.
-        let envelope = parse_envelope("GET /v3/balance", response).expect("envelope");
-        assert!(envelope.data().is_none());
-        assert!(matches!(
-            envelope.require_data("GET /v3/balance"),
-            Err(Error::MissingField { field: "data", .. })
-        ));
+    fn null_and_bodiless_successes_have_the_same_empty_answer() {
+        for body in ["null", "", "   \n\t "] {
+            for status in [200, 204, 205] {
+                let response = Response::new(
+                    status,
+                    [("Content-Length".to_string(), body.len().to_string())],
+                    body.as_bytes().to_vec(),
+                );
+                // A literal `null` body and a bodiless success decode to an
+                // envelope with nothing in it; a caller that needs `data` then
+                // gets a typed missing-field error.
+                let envelope = parse_envelope("GET /v3/balance", response)
+                    .unwrap_or_else(|error| panic!("{status} {body:?}: {error}"));
+                assert!(envelope.data().is_none(), "{status} {body:?}");
+                assert!(
+                    matches!(
+                        envelope.require_data("GET /v3/balance"),
+                        Err(Error::MissingField { field: "data", .. })
+                    ),
+                    "{status} {body:?}"
+                );
+            }
+        }
     }
 
     #[test]
