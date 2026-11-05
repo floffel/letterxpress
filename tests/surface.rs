@@ -72,7 +72,10 @@ async fn get_price_sends_the_letter_object_with_pages() {
     assert_eq!(body["letter"]["specification"]["pages"], 3);
     assert_eq!(body["letter"]["registered"], "r2");
     assert_eq!(recorder.requests()[0].method, Method::Get);
-    assert_eq!(recorder.requests()[0].path_and_query(), "/v3/price");
+    assert_eq!(
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/price")
+    );
 }
 
 #[tokio::test]
@@ -86,7 +89,10 @@ async fn list_print_jobs_sends_the_documented_filter_and_page() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Get);
-    assert_eq!(request.path_and_query(), "/v3/printjobs?filter=hold&page=2");
+    assert_eq!(
+        request.path_and_query().as_deref(),
+        Some("/v3/printjobs?filter=hold&page=2")
+    );
     assert!(request.json().expect("json").get("auth").is_some());
 }
 
@@ -101,7 +107,10 @@ async fn get_print_job_uses_the_documented_path() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Get);
-    assert_eq!(request.path_and_query(), "/v3/printjobs/42");
+    assert_eq!(
+        request.path_and_query().as_deref(),
+        Some("/v3/printjobs/42")
+    );
 }
 
 #[tokio::test]
@@ -121,7 +130,7 @@ async fn submit_print_job_posts_the_full_letter_object() {
     assert_eq!(requests.len(), 1, "a submit is sent exactly once");
     let request = &requests[0];
     assert_eq!(request.method, Method::Post);
-    assert_eq!(request.path_and_query(), "/v3/printjobs");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/printjobs"));
 
     let body = request.json().expect("json");
     assert!(body["letter"]["base64_file"]
@@ -162,7 +171,7 @@ async fn update_print_job_puts_only_the_mutable_fields() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Put);
-    assert_eq!(request.path_and_query(), "/v3/printjobs/5");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/printjobs/5"));
     let body = request.json().expect("json");
     assert_eq!(body["letter"]["dispatch_date"], "2026-11-02");
     assert_eq!(body["letter"]["registered"], "r1");
@@ -183,7 +192,7 @@ async fn delete_print_job_sends_a_body_with_auth() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Delete);
-    assert_eq!(request.path_and_query(), "/v3/printjobs/5");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/printjobs/5"));
     assert_eq!(request.json().expect("json")["auth"]["mode"], "test");
 }
 
@@ -199,7 +208,7 @@ async fn submit_email_job_posts_the_email_letter_object() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Post);
-    assert_eq!(request.path_and_query(), "/v3/emailjobs");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/emailjobs"));
     let body = request.json().expect("json");
     assert_eq!(body["letter"]["email_letter"]["email_option"], "mailsecure");
     assert_eq!(
@@ -214,8 +223,8 @@ async fn list_email_jobs_uses_the_documented_query() {
     let query = EmailJobQuery::new().with_filter(JobFilter::Queue);
     client.email_jobs(&query).await.expect("list");
     assert_eq!(
-        recorder.requests()[0].path_and_query(),
-        "/v3/emailjobs?filter=queue"
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/emailjobs?filter=queue")
     );
 }
 
@@ -227,7 +236,10 @@ async fn get_email_job_uses_the_documented_path() {
         .email_job(&JobId::new("9").expect("id"))
         .await
         .expect("get");
-    assert_eq!(recorder.requests()[0].path_and_query(), "/v3/emailjobs/9");
+    assert_eq!(
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/emailjobs/9")
+    );
     assert_eq!(recorder.requests()[0].method, Method::Get);
 }
 
@@ -245,7 +257,7 @@ async fn update_email_job_sends_the_email_object() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Put);
-    assert_eq!(request.path_and_query(), "/v3/emailjobs/9");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/emailjobs/9"));
     assert_eq!(
         request.json().expect("json")["email"]["email_receiver"],
         "neu@example.de"
@@ -262,7 +274,7 @@ async fn delete_email_job_uses_delete_with_auth() {
         .expect("delete");
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Delete);
-    assert_eq!(request.path_and_query(), "/v3/emailjobs/9");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/emailjobs/9"));
 }
 
 #[tokio::test]
@@ -282,7 +294,7 @@ async fn journal_sends_the_filter_object() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Get);
-    assert_eq!(request.path_and_query(), "/v3/journal");
+    assert_eq!(request.path_and_query().as_deref(), Some("/v3/journal"));
     let body = request.json().expect("json");
     assert_eq!(body["filter"]["type"], "print");
     assert_eq!(body["filter"]["searchstr"], "4711");
@@ -297,8 +309,8 @@ async fn transactions_send_the_documented_filter() {
     let query = TransactionQuery::new().with_filter(TransactionFilter::PrintJobs);
     client.transactions(&query).await.expect("transactions");
     assert_eq!(
-        recorder.requests()[0].path_and_query(),
-        "/v3/transactions?filter=printjobs"
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/transactions?filter=printjobs")
     );
 }
 
@@ -307,8 +319,8 @@ async fn invoices_and_invoice_use_the_documented_paths() {
     let (client, recorder) = recording(r#"{"status":200,"message":"OK","data":{"invoices":[]}}"#);
     client.invoices(2).await.expect("invoices");
     assert_eq!(
-        recorder.requests()[0].path_and_query(),
-        "/v3/invoices?page=2"
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/invoices?page=2")
     );
 
     let (client, recorder) = recording(
@@ -318,7 +330,10 @@ async fn invoices_and_invoice_use_the_documented_paths() {
         .invoice(&letterxpress::InvoiceId::new("1").expect("id"))
         .await
         .expect("invoice");
-    assert_eq!(recorder.requests()[0].path_and_query(), "/v3/invoices/1");
+    assert_eq!(
+        recorder.requests()[0].path_and_query().as_deref(),
+        Some("/v3/invoices/1")
+    );
     assert_eq!(recorder.requests()[0].method, Method::Get);
 }
 

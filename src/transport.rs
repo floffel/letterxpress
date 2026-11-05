@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
+use url::Url;
 
 use crate::{Error, Result, TransportKind};
 
@@ -593,6 +594,14 @@ impl RecordedRequest {
     /// The path plus query string, for assertions that do not care about the
     /// host.
     ///
+    /// The URL is parsed rather than split by hand, so userinfo, a port and a
+    /// query on a pathless URL all land on the right side. The fragment, if
+    /// any, is not part of the result, and the path is normalised the way
+    /// [`url`](https://docs.rs/url) normalises it (non-ASCII bytes are
+    /// percent-encoded).
+    ///
+    /// Returns `None` when [`url`](Self::url) is not an absolute URL.
+    ///
     /// ```
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
@@ -602,20 +611,24 @@ impl RecordedRequest {
     ///     Vec::new(),
     ///     Vec::new(),
     /// );
-    /// assert_eq!(recorded.path_and_query(), "/v3/printjobs?filter=hold");
+    /// assert_eq!(recorded.path_and_query().as_deref(), Some("/v3/printjobs?filter=hold"));
+    ///
+    /// // A query on a pathless URL is kept, and a relative URL is rejected.
+    /// let pathless = RecordedRequest::new(Method::Get, "https://api.letterxpress.de?filter=hold", Vec::new(), Vec::new());
+    /// assert_eq!(pathless.path_and_query().as_deref(), Some("/?filter=hold"));
+    ///
+    /// let relative = RecordedRequest::new(Method::Get, "/v3/balance", Vec::new(), Vec::new());
+    /// assert_eq!(relative.path_and_query(), None);
     /// ```
     #[must_use]
-    pub fn path_and_query(&self) -> &str {
-        match self.url.find("://") {
-            Some(scheme_end) => {
-                let after_scheme = &self.url[scheme_end + 3..];
-                match after_scheme.find('/') {
-                    Some(path_start) => &after_scheme[path_start..],
-                    None => "/",
-                }
-            }
-            None => self.url.as_str(),
+    pub fn path_and_query(&self) -> Option<String> {
+        let parsed = Url::parse(&self.url).ok()?;
+        let mut target = parsed.path().to_owned();
+        if let Some(query) = parsed.query() {
+            target.push('?');
+            target.push_str(query);
         }
+        Some(target)
     }
 }
 

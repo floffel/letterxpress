@@ -8,7 +8,7 @@
 mod common;
 
 use common::{client_with, pdf};
-use letterxpress::transport::Response;
+use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
     Color, Date, EmailOption, JobStatus, Letter, Mode, Money, PrintMode, Registered, Shipping,
     MAX_NOTICE_CHARS,
@@ -208,6 +208,51 @@ proptest! {
         prop_assert!(delivery.is_ok(), "{address}");
         let delivery = delivery.expect("delivery");
         prop_assert_eq!(delivery.receiver(), address);
+    }
+
+    /// The recorded helper agrees with `url` as the oracle for every absolute
+    /// URL: path plus query, fragment dropped.
+    #[test]
+    fn path_and_query_matches_the_url_oracle(
+        host in "[a-z]{1,20}\\.test",
+        port in proptest::option::of(1u16..65535),
+        path in "/[a-z0-9/]{0,40}",
+        query in proptest::option::of("[a-z0-9=&]{1,30}"),
+    ) {
+        let mut text = format!("https://{host}");
+        if let Some(port) = port {
+            text.push(':');
+            text.push_str(&port.to_string());
+        }
+        text.push_str(&path);
+        if let Some(query) = &query {
+            text.push('?');
+            text.push_str(query);
+        }
+        text.push_str("#fragment");
+
+        let parsed = url::Url::parse(&text).expect("the generated URL is absolute");
+        let mut expected = parsed.path().to_owned();
+        if let Some(query) = parsed.query() {
+            expected.push('?');
+            expected.push_str(query);
+        }
+
+        let recorded = RecordedRequest::new(Method::Get, text, Vec::new(), Vec::new());
+        prop_assert_eq!(recorded.path_and_query(), Some(expected));
+    }
+
+    /// No input panics, and the result is present exactly when `url` accepts
+    /// the text as an absolute URL.
+    #[test]
+    fn path_and_query_never_panics(text in ".*") {
+        let recorded = RecordedRequest::new(Method::Get, text.clone(), Vec::new(), Vec::new());
+        prop_assert_eq!(
+            recorded.path_and_query().is_some(),
+            url::Url::parse(&text).is_ok(),
+            "{:?}",
+            text
+        );
     }
 }
 

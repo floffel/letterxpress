@@ -22,4 +22,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "path_and_query"
+path = "fuzz_targets/path_and_query.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
