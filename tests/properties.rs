@@ -191,6 +191,52 @@ proptest! {
         prop_assert_eq!(u64::from(job.pages()), expected, "{:?}", pages);
     }
 
+    /// The bug this guards: whatever the letter-level `registered` key holds, a
+    /// letter the specification priced as registered is never echoed as
+    /// unregistered. A token that is no code at all is refused; everything else
+    /// leaves the priced `r2` in place.
+    #[test]
+    fn a_priced_registered_letter_is_never_echoed_unregistered(
+        extra in proptest::collection::vec(any::<u8>(), 0..1024)
+    ) {
+        let Ok(extra) = serde_json::from_slice::<serde_json::Value>(&extra) else {
+            return Ok(());
+        };
+        let letter = serde_json::json!({
+            "specification": {"pages": 1, "registered": "r2"},
+            "registered": extra,
+        });
+        match letterxpress::PriceEcho::from_envelope(&letter) {
+            Err(_) => {}
+            Ok(echo) => {
+                prop_assert!(echo.registered.is_some(), "the priced r2 was dropped");
+                prop_assert_eq!(echo.pages, 1);
+            }
+        }
+    }
+
+    /// A price echo never panics on hostile JSON, and never invents a page
+    /// count: when it decodes, `pages` is the number the specification carried.
+    #[test]
+    fn price_echo_decoding_never_panics_and_never_invents_pages(
+        bytes in proptest::collection::vec(any::<u8>(), 0..4096)
+    ) {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Ok(());
+        };
+        if let Ok(echo) = letterxpress::PriceEcho::from_envelope(&value) {
+            let spec = value.get("specification").expect("an echo has a specification");
+            prop_assert!(spec.is_object(), "an echo needs a specification object");
+            prop_assert_eq!(
+                u64::from(echo.pages),
+                spec.get("pages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            );
+        }
+        let _ = serde_json::from_value::<letterxpress::Price>(value);
+    }
+
     /// A flag means the same thing as a number and as its decimal string, and
     /// zero is the only `false` — the rule that used to hold for numbers only.
     #[test]

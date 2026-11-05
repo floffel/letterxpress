@@ -239,6 +239,29 @@ the crate has no per-page parameter).
 | invoice | `id` (int), `amount`, `vat`, `invoice_date` | p. 31 |
 | invoice PDF | the above plus `base64_data` | p. 33 |
 
+### Price echo (p. 10–11)
+
+`GET /v3/price` answers `{price, letter}`, and the `letter` object is the echo of
+what was priced: the fields of a `specification` (`pages`, `color`, `mode`,
+`shipping`, `email_option`, `c4`) plus `registered`.
+
+Where `registered` sits varies: the quote request sends it next to
+`specification` (p. 10), while a job object carries it as a top-level field
+(p. 13–15), and the echo this crate has seen puts it in both places. The crate
+therefore reads either, with one rule: the letter-level code wins **when it
+carries one**, and `null`, `""` or an absent key means "not supplied" and leaves
+the `specification` value in place. It never overwrites a priced `r1`/`r2` with
+"not registered". A letter-level value that is a number goes through the same
+`Registered::from_wire` path as a string (carried verbatim when unknown); a value
+that cannot be a code at all (a nested object or an array) fails the decode
+rather than being reported as unregistered.
+
+A `letter` object **without** a `specification` is a decode error
+(`Error::UnexpectedShape`, `missing field specification`): echoing "zero pages,
+nothing registered" would misreport a price that was quoted. A `letter` that is
+not an object at all carries nothing to echo and is ignored, so a body this crate
+cannot place never costs the caller the price itself.
+
 ## 6. Job status values
 
 The document gives the vocabulary only through the filter table (p. 12) and the
