@@ -114,6 +114,7 @@ impl std::fmt::Display for TransportKind {
 /// | [`Error::RateLimited`] | 429 | yes | no |
 /// | [`Error::Rejected`] | carried | no | no |
 /// | [`Error::Upstream`] | carried | no | no |
+/// | [`Error::UnexpectedStatus`] | carried | no | no |
 /// | [`Error::Ambiguous`] | none | no | yes |
 /// | [`Error::Transport`] / `Connect` | none | yes | no |
 /// | [`Error::Transport`] / `Timeout` | none | yes | no |
@@ -160,6 +161,12 @@ impl std::fmt::Display for TransportKind {
 ///
 /// No variant is both retryable and ambiguous: a terminal error never hides a
 /// possible duplicate.
+///
+/// An informational (1xx) or redirect (3xx) answer is
+/// [`Error::UnexpectedStatus`]. Redirects are never followed, because the
+/// `Location` could send the credential to another host. On a submit the
+/// request has already been written, so the client promotes that signal to
+/// [`Error::Ambiguous`]; on an idempotent call it remains terminal.
 ///
 /// ```
 /// use letterxpress::Error;
@@ -245,16 +252,54 @@ pub enum Error {
         message: String,
     },
 
+    /// The provider answered with an informational (1xx) or redirect (3xx)
+    /// status. Redirects are not followed, because doing so could send the
+    /// credential to another host.
+    ///
+    /// On a submit (a `POST`) this is reported as [`Error::Ambiguous`]
+    /// instead: the request was already written and the job may exist.
+    /// Idempotent calls keep this terminal error.
+    ///
+    /// ```
+    /// use letterxpress::Error;
+    ///
+    /// let error = Error::UnexpectedStatus {
+    ///     status: 302,
+    ///     endpoint: "GET /v3/balance",
+    ///     message: "Found".into(),
+    /// };
+    /// assert_eq!(error.status(), Some(302));
+    /// assert!(!error.is_ambiguous());
+    /// assert!(!error.is_retryable());
+    /// ```
+    #[error("unexpected HTTP status {status} in response for `{endpoint}`: {message}")]
+    UnexpectedStatus {
+        /// Informational or redirect status from the HTTP response.
+        status: u16,
+        /// The endpoint that was called.
+        endpoint: &'static str,
+        /// Provider message, or a truncated body when there was no envelope.
+        message: String,
+    },
+
     /// The request may have been processed, but no usable answer arrived.
     ///
     /// This is only produced for non-idempotent calls (job submission) after a
-    /// timeout, a mid-flight connection failure, a 5xx, or a 2xx whose body
-    /// could not be decoded — a 200 means the job exists and is billed even
-    /// when its tracking data is unreadable. **Do not resubmit blindly**: the
-    /// letter may already be in production. Look the job up
+    /// timeout, a mid-flight connection failure, a 5xx, a 1xx/3xx answer, or a
+    /// 2xx whose body could not be decoded — a 200 means the job exists and is
+    /// billed even when its tracking data is unreadable. **Do not resubmit
+    /// blindly**: the letter may already be in production. Look the job up
     /// first — via [`Client::print_jobs`](crate::Client::print_jobs) with the
     /// `notice` you set on the letter, or via the returned tracking data — and
     /// only submit again if it is absent.
+    ///
+    /// ```
+    /// use letterxpress::Error;
+    ///
+    /// let error = Error::Ambiguous { message: "timeout after 30s".into() };
+    /// assert!(error.is_ambiguous());
+    /// assert!(!error.is_retryable());
+    /// ```
     #[error("request may have been processed: {message}")]
     Ambiguous {
         /// What was observed, for logs and for the reconciliation decision.
@@ -385,6 +430,13 @@ impl Error {
     ///
     /// let err = Error::Unauthorized { message: "Unauthorized.".into() };
     /// assert_eq!(err.status(), Some(401));
+    ///
+    /// let redirect = Error::UnexpectedStatus {
+    ///     status: 302,
+    ///     endpoint: "GET /v3/balance",
+    ///     message: String::new(),
+    /// };
+    /// assert_eq!(redirect.status(), Some(302));
     /// ```
     #[must_use]
     pub fn status(&self) -> Option<u16> {
@@ -394,7 +446,9 @@ impl Error {
             Self::NotFound { .. } => Some(404),
             Self::MethodNotAllowed { .. } => Some(405),
             Self::RateLimited { .. } => Some(429),
-            Self::Rejected { status, .. } | Self::Upstream { status, .. } => Some(*status),
+            Self::Rejected { status, .. }
+            | Self::Upstream { status, .. }
+            | Self::UnexpectedStatus { status, .. } => Some(*status),
             _ => None,
         }
     }
@@ -446,6 +500,7 @@ mod tests {
         "Transport",
         "Unauthorized",
         "UnexpectedShape",
+        "UnexpectedStatus",
         "Upstream",
         "Utf8",
         "Validation",
@@ -513,6 +568,7 @@ mod tests {
             Error::Json { .. } => "Json",
             Error::MissingField { .. } => "MissingField",
             Error::UnexpectedShape { .. } => "UnexpectedShape",
+            Error::UnexpectedStatus { .. } => "UnexpectedStatus",
             Error::TooLarge { .. } => "TooLarge",
             Error::Base64 { .. } => "Base64",
             Error::Utf8 { .. } => "Utf8",
@@ -525,7 +581,9 @@ mod tests {
         match row.status {
             "none" => None,
             "carried" => match &row.error {
-                Error::Rejected { status, .. } | Error::Upstream { status, .. } => Some(*status),
+                Error::Rejected { status, .. }
+                | Error::Upstream { status, .. }
+                | Error::UnexpectedStatus { status, .. } => Some(*status),
                 _ => None,
             },
             fixed => fixed.parse::<u16>().ok(),
@@ -623,6 +681,17 @@ mod tests {
                 Error::Upstream {
                     status: 502,
                     message: "Bad Gateway".into(),
+                },
+            ),
+            row(
+                "[`Error::UnexpectedStatus`]",
+                "carried",
+                false,
+                false,
+                Error::UnexpectedStatus {
+                    status: 302,
+                    endpoint: "GET /v3/balance",
+                    message: "Found".into(),
                 },
             ),
             row(
@@ -782,8 +851,13 @@ mod tests {
             );
             if cell == "carried" {
                 assert!(
-                    matches!(&row.error, Error::Rejected { .. } | Error::Upstream { .. }),
-                    "`{}`: only `Rejected` and `Upstream` carry a status",
+                    matches!(
+                        &row.error,
+                        Error::Rejected { .. }
+                            | Error::Upstream { .. }
+                            | Error::UnexpectedStatus { .. }
+                    ),
+                    "`{}`: only `Rejected`, `Upstream` and `UnexpectedStatus` carry a status",
                     row.label
                 );
             }

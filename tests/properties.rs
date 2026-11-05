@@ -50,6 +50,11 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
             status,
             message: text.into(),
         },
+        Error::UnexpectedStatus {
+            status,
+            endpoint: "GET /v3/balance",
+            message: text.into(),
+        },
         Error::Ambiguous {
             message: text.into(),
         },
@@ -534,6 +539,11 @@ fn a_carried_status_is_reported_verbatim_at_both_ends_of_the_range() {
             Error::Upstream {
                 status,
                 message: "upstream".into(),
+            },
+            Error::UnexpectedStatus {
+                status,
+                endpoint: "GET /v3/balance",
+                message: "redirect".into(),
             },
         ] {
             assert_eq!(error.status(), Some(status), "{status}: {error}");
