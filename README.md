@@ -169,8 +169,9 @@ stack, no async runtime, no socket. Bring your own `Transport` implementation
   than sanitised. Redirects are not followed, so a 302 cannot move the key to
   another host.
 - Payload sizes are checked before allocation; decoded base64 is bounded by the
-  documented 50 MB; error bodies are truncated to 512 characters before they
-  reach a log line.
+  documented 50 MB; a decoded job is bounded to 50 000 items of at most 10 000
+  pages each, so `PrintJob::pages()` cannot overflow; error bodies are truncated
+  to 512 characters before they reach a log line.
 - There is no shared secret to compare in this protocol (the key is a bearer
   credential in the body, not a signature the client verifies), so there is no
   constant-time comparison to make. Nothing in the crate logs a body.

@@ -6,10 +6,17 @@
 //! unknown enum values survive as `Other(String)`. Nothing in here can fail on
 //! a provider that adds a field.
 //!
-//! The one place that refuses instead of defaulting is a flag (`c4`,
-//! `bank_form`): a value nobody can read — `"y"`, `"on"`, a nested object — is a
-//! decode error, not a silent `false`. Numbers and their string forms follow the
-//! same rule, so `1`, `"1"`, `"2"` and `"01"` are all `true`.
+//! Two kinds of value refuse instead of defaulting, because defaulting them
+//! would misreport money or volume:
+//!
+//! * A flag (`c4`, `bank_form`): a value nobody can read — `"y"`, `"on"`, a
+//!   nested object — is a decode error, not a silent `false`. Numbers and their
+//!   string forms follow the same rule, so `1`, `"1"`, `"2"` and `"01"` are all
+//!   `true`.
+//! * A count inside a bound: `items[].pages` above [`MAX_ITEM_PAGES`], and a
+//!   job with more than [`MAX_JOB_ITEMS`] items, are refused at the boundary.
+//!   Every decoded job therefore sums to a page total that fits a `u32`, which
+//!   is what keeps [`PrintJob::pages`] arithmetic sound.
 //!
 //! ```
 //! use letterxpress::PrintJob;
@@ -324,6 +331,179 @@ fn unspecified_status() -> JobStatus {
     JobStatus::Other(String::new())
 }
 
+/// The documented ceiling for one letter's page count, and therefore for one
+/// `items[].pages` value in a job response.
+///
+/// The price specification accepts exactly the same range (`1` to `10 000`), so
+/// a job item claiming more pages than a letter can have is malformed rather
+/// than merely large. Decoding refuses it instead of letting one absurd number
+/// reach a page total, a cost estimate or an allocation.
+///
+/// A job of at most [`MAX_JOB_ITEMS`] items with at most this many pages each
+/// sums to at most 500 000 000 pages, which fits a [`u32`] with room to spare —
+/// that bound is what makes [`PrintJob::pages`] arithmetic overflow-free for
+/// every value that came off the wire.
+///
+/// ```
+/// use letterxpress::{PrintJob, MAX_ITEM_PAGES};
+///
+/// // The ceiling itself decodes ...
+/// let at_limit = serde_json::json!({"id": 1, "items": [{"pages": MAX_ITEM_PAGES}]});
+/// let job: PrintJob = serde_json::from_value(at_limit)?;
+/// assert_eq!(job.pages(), MAX_ITEM_PAGES);
+///
+/// // ... one page above it does not.
+/// let above = serde_json::json!({"id": 1, "items": [{"pages": MAX_ITEM_PAGES + 1}]});
+/// assert!(serde_json::from_value::<PrintJob>(above).is_err());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+pub const MAX_ITEM_PAGES: u32 = 10_000;
+
+/// The most `items[]` entries a decoded job may carry.
+///
+/// One entry is one letter, and a job is built from a single upload that is
+/// capped at [`crate::MAX_PDF_BYTES`] (50 MB): one addressed page per letter
+/// makes 50 000 items far more than any upload can produce, while still
+/// bounding what a hostile response can allocate. Decoding refuses more.
+///
+/// ```
+/// use letterxpress::{PrintJob, MAX_JOB_ITEMS};
+///
+/// // The limit itself decodes ...
+/// let at_limit = serde_json::json!({
+///     "id": 1,
+///     "items": vec![serde_json::json!({"pages": 1}); MAX_JOB_ITEMS],
+/// });
+/// let job: PrintJob = serde_json::from_value(at_limit)?;
+/// assert_eq!(job.items.len(), MAX_JOB_ITEMS);
+///
+/// // ... one item above it does not.
+/// let above = serde_json::json!({
+///     "id": 1,
+///     "items": vec![serde_json::json!({"pages": 1}); MAX_JOB_ITEMS + 1],
+/// });
+/// assert!(serde_json::from_value::<PrintJob>(above).is_err());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+pub const MAX_JOB_ITEMS: usize = 50_000;
+
+/// A page count as an unsigned number, or the reason it is not one.
+fn pages_from_u64(value: u64) -> Result<u32, String> {
+    u32::try_from(value)
+        .ok()
+        .filter(|pages| *pages <= MAX_ITEM_PAGES)
+        .ok_or_else(|| {
+            format!("a page count of {value} is above the documented maximum of {MAX_ITEM_PAGES}")
+        })
+}
+
+/// Decodes `items[].pages` — a number, its integral string form or `null` — and
+/// refuses anything outside `0..=MAX_ITEM_PAGES`.
+///
+/// The ceiling is a validation, not a guess: a job that reports more pages than
+/// a letter can have is malformed, and silently truncating it would understate
+/// what the caller is billed for.
+fn de_pages<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    struct PagesVisitor;
+
+    impl Visitor<'_> for PagesVisitor {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "a page count from 0 to {MAX_ITEM_PAGES}, as a number, as its string form or null"
+            )
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            pages_from_u64(value).map_err(E::custom)
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            match u64::try_from(value) {
+                Ok(value) => pages_from_u64(value).map_err(E::custom),
+                Err(_) => Err(E::custom(format_args!(
+                    "a page count must not be negative: {value}"
+                ))),
+            }
+        }
+
+        // `12.0` is twelve pages. A JSON writer that only emits floats is
+        // spelling the same number, so it gets the same answer.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            let in_range = (0.0..=f64::from(MAX_ITEM_PAGES)).contains(&value);
+            if value.is_finite() && value.fract() == 0.0 && in_range {
+                Ok(value as u32)
+            } else {
+                Err(E::custom(format_args!(
+                    "a page count must be a whole number from 0 to {MAX_ITEM_PAGES}: {value}"
+                )))
+            }
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            let trimmed = value.trim();
+            if let Ok(number) = trimmed.parse::<u64>() {
+                return pages_from_u64(number).map_err(E::custom);
+            }
+            match trimmed.parse::<f64>() {
+                Ok(number) => self.visit_f64(number),
+                Err(_) => Err(E::custom(format_args!(
+                    "a page count must be a whole number from 0 to {MAX_ITEM_PAGES}: {value:?}"
+                ))),
+            }
+        }
+
+        // `null` is "not supplied" and means zero pages, like an absent field.
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(0)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(0)
+        }
+    }
+
+    deserializer.deserialize_any(PagesVisitor)
+}
+
+/// Decodes `items[]` with [`MAX_JOB_ITEMS`] as a hard ceiling.
+///
+/// An unbounded array lets a response decide how much memory the caller
+/// allocates; the limit is checked while the sequence is read, before the
+/// allocation grows, and it is generous enough that no real job can reach it.
+fn de_items<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<PrintItem>, D::Error> {
+    struct ItemsVisitor;
+
+    impl<'de> Visitor<'de> for ItemsVisitor {
+        type Value = Vec<PrintItem>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "an array of at most {MAX_JOB_ITEMS} print items")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_JOB_ITEMS));
+            while let Some(item) = seq.next_element::<PrintItem>()? {
+                if items.len() == MAX_JOB_ITEMS {
+                    return Err(de::Error::custom(format_args!(
+                        "a job carries at most {MAX_JOB_ITEMS} items"
+                    )));
+                }
+                items.push(item);
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_seq(ItemsVisitor)
+}
+
 /// One address block inside a print job (`items[]`).
 ///
 /// `amount` is **net**, `vat` the tax share; the amount actually charged is
@@ -345,8 +525,13 @@ pub struct PrintItem {
     /// The recipient address as printed in the PDF, one line.
     #[serde(default, deserialize_with = "de_opt_string", alias = "Address")]
     pub address: Option<String>,
-    /// Pages in this item.
-    #[serde(default)]
+    /// Pages in this item, `0` to [`MAX_ITEM_PAGES`].
+    ///
+    /// Decoded from a number, its integral string form (`"2"`) or `null`
+    /// (nothing supplied → `0`). A negative count or one above the documented
+    /// ceiling fails the decode: an absurd page count must not reach a page
+    /// total or a cost estimate.
+    #[serde(default, deserialize_with = "de_pages")]
     pub pages: u32,
     /// Net amount (wire key `amount`).
     #[serde(default, rename = "amount")]
@@ -432,6 +617,24 @@ impl PrintItem {
 /// assert!(unreadable.is_err(), "\"y\" is not a spelling this crate guesses at");
 /// # Ok::<(), serde_json::Error>(())
 /// ```
+///
+/// Page counts are bounded at the decode boundary, because [`PrintJob::pages`]
+/// sums them: an item may claim up to [`MAX_ITEM_PAGES`] pages, one above is
+/// refused, and so is an `items[]` array longer than [`MAX_JOB_ITEMS`].
+///
+/// ```
+/// use letterxpress::PrintJob;
+///
+/// let at_limit: PrintJob = serde_json::from_str(r#"{"id":1,"items":[{"pages":10000}]}"#)?;
+/// assert_eq!(at_limit.pages(), 10_000);
+///
+/// let above = serde_json::from_str::<PrintJob>(r#"{"id":1,"items":[{"pages":10001}]}"#);
+/// assert!(above.is_err(), "more pages than a letter can have");
+///
+/// let negative = serde_json::from_str::<PrintJob>(r#"{"id":1,"items":[{"pages":-1}]}"#);
+/// assert!(negative.is_err());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PrintJob {
     /// Provider job id.
@@ -485,20 +688,47 @@ pub struct PrintJob {
     /// Last-update timestamp, same format.
     #[serde(default, deserialize_with = "de_opt_string", alias = "updatedAt")]
     pub updated_at: Option<String>,
-    /// One entry per letter in the job.
-    #[serde(default)]
+    /// One entry per letter in the job, at most [`MAX_JOB_ITEMS`].
+    ///
+    /// A longer array fails the decode instead of allocating whatever a hostile
+    /// response asks for.
+    #[serde(default, deserialize_with = "de_items")]
     pub items: Vec<PrintItem>,
 }
 
 impl PrintJob {
-    /// Total pages across all items.
+    /// Total pages across all items, saturated at [`u32::MAX`].
+    ///
+    /// The sum is accumulated with `checked_add`-style saturation, so no
+    /// provider value can make it wrap to a small number or panic a debug
+    /// build. A decoded job cannot reach the ceiling anyway — decoding bounds
+    /// each item to [`MAX_ITEM_PAGES`] and the list to [`MAX_JOB_ITEMS`], so at
+    /// most 500 000 000 pages are possible; only a hand-built job can saturate.
     ///
     /// ```
-    /// assert_eq!(letterxpress::PrintJob::default().pages(), 0);
+    /// use letterxpress::{PrintItem, PrintJob};
+    ///
+    /// let job = PrintJob {
+    ///     items: vec![
+    ///         PrintItem { pages: 2, ..PrintItem::default() },
+    ///         PrintItem { pages: 3, ..PrintItem::default() },
+    ///     ],
+    ///     ..PrintJob::default()
+    /// };
+    /// assert_eq!(job.pages(), 5);
+    ///
+    /// // Hand-built and impossible: it saturates instead of wrapping to 0.
+    /// let hostile = PrintJob {
+    ///     items: vec![PrintItem { pages: u32::MAX, ..PrintItem::default() }; 2],
+    ///     ..PrintJob::default()
+    /// };
+    /// assert_eq!(hostile.pages(), u32::MAX);
     /// ```
     #[must_use]
     pub fn pages(&self) -> u32 {
-        self.items.iter().map(|item| item.pages).sum()
+        self.items
+            .iter()
+            .fold(0u32, |sum, item| sum.saturating_add(item.pages))
     }
 
     /// Net sum across items.
@@ -1246,8 +1476,12 @@ impl Journal {
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct PriceEcho {
-    /// Pages that were priced.
-    #[serde(default)]
+    /// Pages that were priced, `0` to [`MAX_ITEM_PAGES`].
+    ///
+    /// Decoded with the same bounded rule as [`PrintItem::pages`]: `2`, `"2"`
+    /// and `2.0` are the same count, `null` is zero, and anything above the
+    /// documented ceiling is refused rather than echoed into a cost estimate.
+    #[serde(default, deserialize_with = "de_pages")]
     pub pages: u32,
     /// Colour that was priced.
     #[serde(default)]
@@ -1496,5 +1730,109 @@ mod tests {
         );
         assert_eq!(IdVisitor.visit_i64::<serde_json::Error>(-1).unwrap(), "-1");
         assert_eq!(IdVisitor.visit_u64::<serde_json::Error>(8).unwrap(), "8");
+    }
+
+    #[test]
+    fn a_page_count_inside_the_documented_range_decodes_in_every_spelling() {
+        // Inside the range: zero, one, and the documented ceiling itself.
+        for (value, expected) in [
+            (json!(0), 0),
+            (json!(1), 1),
+            (json!(10_000), 10_000),
+            (json!(10_000u64), 10_000),
+            (json!(10_000.0), 10_000),
+            (json!("1"), 1),
+            (json!(" 10000 "), 10_000),
+            (json!("10000.0"), 10_000),
+            (json!(null), 0),
+        ] {
+            assert_eq!(de_pages(value.clone()).unwrap(), expected, "{value}");
+        }
+
+        // … and an absent field is zero pages.
+        let item: PrintItem = serde_json::from_str("{}").unwrap();
+        assert_eq!(item.pages, 0);
+    }
+
+    #[test]
+    fn a_page_count_outside_the_documented_range_is_refused() {
+        // Just outside the ceiling, and every value that is not a page count at
+        // all: none of them may be truncated into a smaller total.
+        for value in [
+            json!(10_001),
+            json!(10_001u64),
+            json!(10_001.0),
+            json!(u32::MAX),
+            json!(u64::MAX),
+            json!(i64::MAX),
+            json!(-1),
+            json!(-1.0),
+            json!("10001"),
+            json!("18446744073709551615"),
+            json!("-1"),
+            json!("1.5"),
+            json!(1.5),
+            json!("x"),
+            json!(""),
+            json!(true),
+            json!([]),
+            json!({}),
+        ] {
+            assert!(
+                de_pages(value.clone()).is_err(),
+                "{value} is not a page count"
+            );
+        }
+    }
+
+    #[test]
+    fn the_page_error_names_the_documented_maximum() {
+        let error = de_pages::<serde_json::Value>(json!(10_001)).expect_err("refused");
+        let text = error.to_string();
+        assert!(text.contains("10001"), "{text}");
+        assert!(text.contains("10000"), "{text}");
+
+        let negative = de_pages::<serde_json::Value>(json!(-2)).expect_err("refused");
+        assert!(negative.to_string().contains("negative"), "{negative}");
+    }
+
+    #[test]
+    fn an_item_array_at_the_limit_decodes_and_one_more_is_refused() {
+        let at_limit = json!({
+            "id": 1,
+            "items": vec![json!({"pages": 1}); MAX_JOB_ITEMS],
+        });
+        let job: PrintJob = serde_json::from_value(at_limit).unwrap();
+        assert_eq!(job.items.len(), MAX_JOB_ITEMS);
+        assert_eq!(job.pages(), u32::try_from(MAX_JOB_ITEMS).unwrap());
+
+        let above = json!({
+            "id": 1,
+            "items": vec![json!({"pages": 1}); MAX_JOB_ITEMS + 1],
+        });
+        let error = serde_json::from_value::<PrintJob>(above).expect_err("refused");
+        assert!(error.to_string().contains("at most 50000"), "{error}");
+
+        // A shape that is not an array at all is refused by the same rule.
+        let not_an_array = serde_json::from_value::<PrintJob>(json!({"id": 1, "items": 5}));
+        assert!(not_an_array.is_err());
+    }
+
+    #[test]
+    fn pages_never_wraps_for_a_hand_built_job() {
+        let job = PrintJob {
+            items: vec![
+                PrintItem {
+                    pages: u32::MAX,
+                    ..PrintItem::default()
+                },
+                PrintItem {
+                    pages: u32::MAX,
+                    ..PrintItem::default()
+                },
+            ],
+            ..PrintJob::default()
+        };
+        assert_eq!(job.pages(), u32::MAX, "saturated, not wrapped to 1");
     }
 }

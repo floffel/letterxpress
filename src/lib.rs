@@ -139,7 +139,7 @@ pub use error::{Error, TransportKind};
 pub use job::{
     Balance, Deletion, EmailJob, EmailJobPage, EmailJobSubmission, Invoice, InvoiceDocument,
     InvoiceId, InvoicePage, JobId, Journal, Pagination, Price, PriceEcho, PrintItem, PrintJob,
-    PrintJobPage, Transaction, TransactionPage,
+    PrintJobPage, Transaction, TransactionPage, MAX_ITEM_PAGES, MAX_JOB_ITEMS,
 };
 pub use letter::{
     Backgrounds, BankForm, EmailDelivery, Letter, PriceRequest, Separator, Specification, Terms,

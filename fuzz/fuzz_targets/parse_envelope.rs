@@ -47,6 +47,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Derived arithmetic on whatever decoded must not panic either.
         if let Ok(job) = serde_json::from_value::<PrintJob>(value.clone()) {
+            let _ = job.pages();
             let _ = job.total();
             let _ = job.net();
             let _ = job.is_terminal();

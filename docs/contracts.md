@@ -191,6 +191,15 @@ bulk-cancel endpoint. Cancellation is `DELETE` on the job within 15 minutes.
 | `tracking_code` | string, optional | `RC123456789DE` (registered mail) |
 | `tracking_status` | string, optional | German carrier text |
 
+**Decode bounds on `items[]`.** The document gives no ceiling for a job's item
+list, and `PrintItem.pages` is provider-controlled, so this crate validates both
+at the decode boundary instead of summing whatever arrives: `items[].pages` is
+refused above 10 000 (`MAX_ITEM_PAGES`, the same ceiling `specification.pages`
+documents for a letter) and `items[]` above 50 000 entries (`MAX_JOB_ITEMS`).
+A decoded job therefore totals at most 500 000 000 pages, which keeps
+`PrintJob::pages()` from wrapping; a job the caller builds by hand saturates at
+`u32::MAX` instead of panicking.
+
 **Gross vs net.** The document's own numbers settle this: for one B&W simplex
 national page it reports `amount: 0.68, vat: 0.13`, and the same job appears in
 the transaction ledger as `-0.81` — i.e. **`amount + vat` is what is charged**.
