@@ -13,7 +13,7 @@ use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
     AmbiguousKind, Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode, Money,
-    PrintMode, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
+    PrintMode, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS, MAX_RETRY_AFTER,
 };
 use proptest::prelude::*;
 
@@ -557,29 +557,98 @@ proptest! {
         );
     }
 
+    /// Whatever a `Retry-After` header contains, a `429` never reports more
+    /// than the ceiling, and it reports a hint exactly when the header is a
+    /// plain count of seconds.
+    #[test]
+    fn retry_after_headers_are_bounded_and_never_panic(header in any::<String>()) {
+        let response = Response::new(
+            429,
+            [("Retry-After".to_string(), header.clone())],
+            Vec::new(),
+        );
+        let error = letterxpress::parse_envelope("GET /v3/balance", response).expect_err("429");
+
+        let expected = header
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|seconds| std::time::Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
+        prop_assert_eq!(error.retry_after(), expected, "{:?}", header);
+        if let Some(wait) = error.retry_after() {
+            prop_assert!(wait <= MAX_RETRY_AFTER, "{:?}", header);
+        }
+        // The wording carries no number above the ceiling either.
+        prop_assert!(
+            !error
+                .to_string()
+                .contains(&format!("{}s", MAX_RETRY_AFTER.as_secs() + 1)),
+            "{:?}: {}",
+            header,
+            error
+        );
+    }
+
+    /// A rate limit built by hand is bounded as well, and the printed wait is
+    /// the one the accessor reports — a caller that logs the error and a caller
+    /// that reads `retry_after()` cannot disagree.
+    #[test]
+    fn a_hand_built_rate_limit_advertises_the_bounded_wait(
+        seconds in any::<u64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let raw = std::time::Duration::new(seconds, nanos);
+        let error = letterxpress::Error::RateLimited {
+            retry_after: Some(raw),
+        };
+        let bounded = raw.min(MAX_RETRY_AFTER);
+
+        prop_assert_eq!(error.retry_after(), Some(bounded));
+        prop_assert!(
+            error
+                .to_string()
+                .contains(&format!("retry after {}s", bounded.as_secs())),
+            "{}",
+            error
+        );
+    }
+
     /// `Retry-After` round-trips through `Display`: what the wording shows is
     /// what the caller can read back, and the seconds are `Duration::as_secs` —
     /// a sub-second remainder is truncated, never rounded up into a retry that
-    /// would hit the limit again.
+    /// would hit the limit again. A value above the ceiling is shown as the
+    /// wait a caller may act on, naming what the provider claimed.
     #[test]
     fn the_retry_after_wording_round_trips(
         secs in any::<u64>(),
         nanos in 0u32..1_000_000_000,
     ) {
+        let raw = std::time::Duration::new(secs, nanos);
+        let bounded = raw.min(MAX_RETRY_AFTER);
         let rendered = letterxpress::Error::RateLimited {
-            retry_after: Some(std::time::Duration::new(secs, nanos)),
+            retry_after: Some(raw),
         }
         .to_string();
-        prop_assert_eq!(
-            &rendered,
-            &format!("letterxpress rate limit reached, retry after {secs}s")
-        );
+        let expected = if bounded == raw {
+            format!(
+                "letterxpress rate limit reached, retry after {}s",
+                bounded.as_secs()
+            )
+        } else {
+            format!(
+                "letterxpress rate limit reached, retry after {}s (capped from {}s)",
+                bounded.as_secs(),
+                raw.as_secs()
+            )
+        };
+        prop_assert_eq!(&rendered, &expected);
 
+        // The number the wording leads with is the wait `retry_after()` reports.
         let parsed = rendered
             .strip_prefix("letterxpress rate limit reached, retry after ")
-            .and_then(|tail| tail.strip_suffix('s'))
+            .and_then(|tail| tail.split('s').next())
             .and_then(|digits| digits.parse::<u64>().ok());
-        prop_assert_eq!(parsed, Some(secs));
+        prop_assert_eq!(parsed, Some(bounded.as_secs()));
     }
 
     /// `Error::status()` reports exactly what the structured kind carries, for
@@ -686,10 +755,15 @@ fn the_retry_after_wording_truncates_at_the_second_boundary() {
         render(Some(Duration::new(1, 1))),
         "letterxpress rate limit reached, retry after 1s"
     );
-    // The largest representable duration renders without wrapping.
+    // The largest representable duration renders without wrapping — at the
+    // ceiling, naming the wait the provider claimed.
     assert_eq!(
         render(Some(Duration::new(u64::MAX, 999_999_999))),
-        format!("letterxpress rate limit reached, retry after {}s", u64::MAX)
+        format!(
+            "letterxpress rate limit reached, retry after {}s (capped from {}s)",
+            MAX_RETRY_AFTER.as_secs(),
+            u64::MAX
+        )
     );
     // No `Retry-After` at all: no suffix, and in particular not "0s".
     assert_eq!(render(None), "letterxpress rate limit reached");
@@ -859,7 +933,10 @@ proptest! {
             );
 
             if let Error::RateLimited { .. } = &error {
-                prop_assert_eq!(error.retry_after(), retry_after);
+                prop_assert_eq!(
+                    error.retry_after(),
+                    retry_after.map(|wait| wait.min(MAX_RETRY_AFTER))
+                );
             } else {
                 prop_assert_eq!(error.retry_after(), None, "{:?}", error);
             }

@@ -161,7 +161,7 @@ pub use client::{
 };
 pub use credentials::{Credentials, Mode};
 pub use date::Date;
-pub use error::{AmbiguousKind, Error, TransportKind};
+pub use error::{AmbiguousKind, Error, TransportKind, MAX_RETRY_AFTER};
 pub use job::{
     Balance, Deletion, EmailJob, EmailJobPage, EmailJobSubmission, Invoice, InvoiceDocument,
     InvoiceId, InvoicePage, JobId, Journal, Pagination, Price, PriceEcho, PrintItem, PrintJob,
