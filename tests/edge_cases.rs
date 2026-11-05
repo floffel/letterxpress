@@ -710,11 +710,74 @@ fn email_letter_and_serial_letter_are_mutually_exclusive() {
 
 #[test]
 fn separators_reject_zero_pages_and_empty_keywords() {
-    assert!(letterxpress::Separator::after_pages(0).is_err());
+    assert!(matches!(
+        letterxpress::Separator::after_pages(0),
+        Err(Error::Validation {
+            field: "letter.serial_letter.pages_separator_value",
+            ..
+        })
+    ));
     assert!(letterxpress::Separator::after_pages(u32::MAX).is_ok());
-    assert!(letterxpress::Separator::at_keyword("").is_err());
-    assert!(letterxpress::Separator::at_keyword("   ").is_err());
-    assert!(letterxpress::Separator::at_keyword("a\u{0}b").is_err());
+    for invalid in ["", "   ", "a\u{0}b"] {
+        assert!(matches!(
+            letterxpress::Separator::at_keyword(invalid),
+            Err(Error::Validation {
+                field: "letter.serial_letter.pages_separator_value",
+                ..
+            })
+        ));
+    }
+    assert!(letterxpress::Separator::at_keyword("x".repeat(255)).is_ok());
+    assert!(matches!(
+        letterxpress::Separator::at_keyword("x".repeat(256)),
+        Err(Error::Validation {
+            field: "letter.serial_letter.pages_separator_value",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn forged_separator_variants_are_revalidated_by_letter() {
+    let invalid = [
+        letterxpress::Separator::Pages(0),
+        letterxpress::Separator::Keyword(String::new()),
+        letterxpress::Separator::Keyword("   ".to_string()),
+        letterxpress::Separator::Keyword("a\u{0}b".to_string()),
+        letterxpress::Separator::Keyword("a\nb".to_string()),
+        letterxpress::Separator::Keyword("x".repeat(256)),
+    ];
+
+    for separator in invalid {
+        let label = format!("{separator:?}");
+        let error = Letter::new(&pdf())
+            .expect("letter")
+            .with_separator(separator)
+            .expect_err("invalid public variant must be rejected");
+        assert!(
+            matches!(
+                error,
+                Error::Validation {
+                    field: "letter.serial_letter.pages_separator_value",
+                    ..
+                }
+            ),
+            "{label:?} produced the wrong error"
+        );
+    }
+
+    for separator in [
+        letterxpress::Separator::Pages(1),
+        letterxpress::Separator::Keyword("x".repeat(255)),
+        letterxpress::Separator::Keyword(":: NEXT ::".to_string()),
+    ] {
+        let expected = separator.to_json();
+        let letter = Letter::new(&pdf())
+            .expect("letter")
+            .with_separator(separator)
+            .expect("valid public variant must be accepted");
+        assert_eq!(letter.to_json()["serial_letter"], expected);
+    }
 }
 
 #[test]

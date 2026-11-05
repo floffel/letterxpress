@@ -224,6 +224,10 @@ impl Default for Specification {
 
 /// Page separator for a serial letter (`serial_letter`).
 ///
+/// The variants are public for pattern matching, but directly constructed
+/// values are validated again by [`Letter::with_separator`] before they can be
+/// stored or serialized into a request.
+///
 /// ```
 /// use letterxpress::Separator;
 ///
@@ -256,13 +260,9 @@ impl Separator {
     /// [`Error::Validation`] when the value would be rejected by the provider,
     /// [`Error::TooLarge`] when it exceeds a documented ceiling.
     pub fn after_pages(pages: u32) -> Result<Self, Error> {
-        if pages == 0 {
-            return Err(Error::invalid(
-                "letter.serial_letter.pages_separator_value",
-                "must be at least 1 page",
-            ));
-        }
-        Ok(Self::Pages(pages))
+        let separator = Self::Pages(pages);
+        separator.validate()?;
+        Ok(separator)
     }
 
     /// Splits at `keyword`. Empty keywords and control characters are
@@ -279,26 +279,9 @@ impl Separator {
     /// [`Error::Validation`] when the value would be rejected by the provider,
     /// [`Error::TooLarge`] when it exceeds a documented ceiling.
     pub fn at_keyword(keyword: impl Into<String>) -> Result<Self, Error> {
-        let keyword = keyword.into();
-        if keyword.trim().is_empty() {
-            return Err(Error::invalid(
-                "letter.serial_letter.pages_separator_value",
-                "keyword must not be empty",
-            ));
-        }
-        if keyword.chars().any(char::is_control) {
-            return Err(Error::invalid(
-                "letter.serial_letter.pages_separator_value",
-                "keyword must not contain control characters",
-            ));
-        }
-        if keyword.chars().count() > 255 {
-            return Err(Error::invalid(
-                "letter.serial_letter.pages_separator_value",
-                "keyword must be at most 255 characters",
-            ));
-        }
-        Ok(Self::Keyword(keyword))
+        let separator = Self::Keyword(keyword.into());
+        separator.validate()?;
+        Ok(separator)
     }
 
     /// The wire shape.
@@ -317,6 +300,28 @@ impl Separator {
                 "pages_separator_type": "string",
                 "pages_separator_value": keyword,
             }),
+        }
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Pages(0) => Err(Error::invalid(
+                "letter.serial_letter.pages_separator_value",
+                "must be at least 1 page",
+            )),
+            Self::Keyword(keyword) if keyword.trim().is_empty() => Err(Error::invalid(
+                "letter.serial_letter.pages_separator_value",
+                "keyword must not be empty",
+            )),
+            Self::Keyword(keyword) if keyword.chars().any(char::is_control) => Err(Error::invalid(
+                "letter.serial_letter.pages_separator_value",
+                "keyword must not contain control characters",
+            )),
+            Self::Keyword(keyword) if keyword.chars().count() > 255 => Err(Error::invalid(
+                "letter.serial_letter.pages_separator_value",
+                "keyword must be at most 255 characters",
+            )),
+            Self::Pages(_) | Self::Keyword(_) => Ok(()),
         }
     }
 }
@@ -1156,12 +1161,18 @@ impl Letter {
     /// # Errors
     ///
     /// [`Error::Validation`] when an `email_letter` is already set — the
-    /// provider documents the two as mutually exclusive.
+    /// provider documents the two as mutually exclusive — or when `separator`
+    /// is invalid. Validation is repeated here so a directly constructed
+    /// [`Separator::Pages`] or [`Separator::Keyword`] cannot bypass the
+    /// constructors and reach the request body.
     ///
     /// ```
-    /// use letterxpress::{EmailDelivery, EmailOption, Letter, Separator};
+    /// use letterxpress::{EmailDelivery, EmailOption, Error, Letter, Separator};
     ///
     /// let letter = Letter::new(b"%PDF-1.4\n")?;
+    /// let forged = letter.clone().with_separator(Separator::Pages(0));
+    /// assert!(matches!(forged, Err(Error::Validation { .. })));
+    ///
     /// assert!(letter.clone().with_separator(Separator::after_pages(2)?).is_ok());
     ///
     /// let email = letter.with_email(EmailDelivery::new("a@b.de", EmailOption::MailDirect)?)?;
@@ -1169,6 +1180,7 @@ impl Letter {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_separator(mut self, separator: Separator) -> Result<Self, Error> {
+        separator.validate()?;
         if self.email.is_some() {
             return Err(Error::invalid(
                 "letter.serial_letter",
