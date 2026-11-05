@@ -6,6 +6,11 @@
 //! unknown enum values survive as `Other(String)`. Nothing in here can fail on
 //! a provider that adds a field.
 //!
+//! The one place that refuses instead of defaulting is a flag (`c4`,
+//! `bank_form`): a value nobody can read — `"y"`, `"on"`, a nested object — is a
+//! decode error, not a silent `false`. Numbers and their string forms follow the
+//! same rule, so `1`, `"1"`, `"2"` and `"01"` are all `true`.
+//!
 //! ```
 //! use letterxpress::PrintJob;
 //!
@@ -179,7 +184,48 @@ record_id! {
     InvoiceId, "invoice id"
 }
 
-/// `0`/`1`, `true`/`false`, `"0"`/`"1"` and null all decode.
+/// The flag words, in any ASCII case: `true`/`yes` are set, `false`/`no` clear.
+fn flag_word(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// One flag token as the provider spells it, or `None` when this crate cannot
+/// interpret it.
+///
+/// The rule is the same for every JSON type: any non-zero number is `true`, `0`
+/// is `false`; the strings add the words `true`/`yes` and `false`/`no` in any
+/// ASCII case; `null` and the empty string mean "not supplied" and are `false`.
+/// Everything else is `None`, so the caller can refuse it instead of guessing.
+fn flag_from_str(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(false);
+    }
+    if let Some(flag) = flag_word(value) {
+        return Some(flag);
+    }
+    if let Ok(number) = value.parse::<i64>() {
+        return Some(number != 0);
+    }
+    match value.parse::<f64>() {
+        Ok(number) if number.is_finite() => Some(number != 0.0),
+        _ => None,
+    }
+}
+
+/// Decodes a documented `0`/`1` flag with the same rule for numbers and strings.
+///
+/// `0`/`false`/`no`, the empty string and `null` are `false`; `1`/`true`/`yes`
+/// and every other non-zero number — as a number or as a string — are `true`.
+/// A token outside that set is a [`de::Error`], never a silent `false`: a
+/// requested and billed C4 envelope must not decode as "not requested" just
+/// because the provider spelled the flag with another string.
 fn de_flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     struct FlagVisitor;
 
@@ -187,7 +233,7 @@ fn de_flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error>
         type Value = bool;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("0/1, true/false or null")
+            f.write_str("0/1 or any other number, true/false, yes/no, their string forms or null")
         }
 
         fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
@@ -202,9 +248,16 @@ fn de_flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error>
             Ok(value != 0)
         }
 
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            Ok(value != 0.0)
+        }
+
         fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-            let value = value.trim();
-            Ok(matches!(value, "1" | "true" | "TRUE" | "True" | "yes"))
+            flag_from_str(value).ok_or_else(|| {
+                E::custom(format_args!(
+                    "flag value {value:?} is not a number, true/false, yes/no or null"
+                ))
+            })
         }
 
         fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -363,6 +416,22 @@ impl PrintItem {
 /// assert!(job.items.is_empty());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
+///
+/// `c4` and `bank_form` follow the crate's flag rule, so a number and its
+/// string form mean the same thing — and a token nobody can read fails the
+/// decode instead of silently claiming the envelope was not requested:
+///
+/// ```
+/// use letterxpress::PrintJob;
+///
+/// let job: PrintJob = serde_json::from_str(r#"{"id":1,"c4":"2","bank_form":"no"}"#)?;
+/// assert!(job.c4, "any non-zero number is true, also as a string");
+/// assert!(!job.bank_form);
+///
+/// let unreadable = serde_json::from_str::<PrintJob>(r#"{"id":1,"c4":"y"}"#);
+/// assert!(unreadable.is_err(), "\"y\" is not a spelling this crate guesses at");
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PrintJob {
     /// Provider job id.
@@ -377,12 +446,18 @@ pub struct PrintJob {
     #[serde(default)]
     pub color: Option<Color>,
     /// Whether a C4 envelope was requested.
+    ///
+    /// Decoded by the flag rule: `0`, `false`, `no`, `""` and `null` are
+    /// `false`; `1`, `true`, `yes` and every other non-zero number — as a
+    /// number or as a string — are `true`.
     #[serde(default, deserialize_with = "de_flag")]
     pub c4: bool,
     /// Registered-mail option.
     #[serde(default)]
     pub registered: Option<Registered>,
     /// Whether a bank form was requested.
+    ///
+    /// Same flag rule as [`PrintJob::c4`]; `bankForm` is accepted too.
     #[serde(default, deserialize_with = "de_flag", alias = "bankForm")]
     pub bank_form: bool,
     /// Free-text notice.
@@ -1154,6 +1229,21 @@ impl Journal {
 /// assert_eq!(echo.registered, Some(letterxpress::Registered::EinschreibenEinwurf));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
+///
+/// `c4` is read with the same flag rule as [`PrintJob::c4`]: `"0"` and `0` are
+/// the same thing, `"2"` is `true`, and an unreadable spelling is refused
+/// instead of being reported as "no envelope":
+///
+/// ```
+/// use letterxpress::PriceEcho;
+///
+/// let echo = PriceEcho::from_envelope(&serde_json::json!({"specification": {"c4": "2"}}))?;
+/// assert!(echo.c4);
+///
+/// let refused = PriceEcho::from_envelope(&serde_json::json!({"specification": {"c4": "y"}}));
+/// assert!(refused.is_err());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct PriceEcho {
     /// Pages that were priced.
@@ -1172,6 +1262,8 @@ pub struct PriceEcho {
     #[serde(default, alias = "emailOption")]
     pub email_option: Option<EmailOption>,
     /// Whether a C4 envelope was priced.
+    ///
+    /// Same flag rule as [`PrintJob::c4`].
     #[serde(default, deserialize_with = "de_flag")]
     pub c4: bool,
     /// Registered-mail option that was priced.
@@ -1273,6 +1365,7 @@ pub struct Deletion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn flags_accept_every_documented_spelling() {
@@ -1286,6 +1379,82 @@ mod tests {
         assert!(!de_flag(serde_json::json!("0")).unwrap());
         assert!(!de_flag(serde_json::json!(null)).unwrap());
         assert!(!de_flag(serde_json::json!(false)).unwrap());
+    }
+
+    #[test]
+    fn a_number_and_its_string_form_mean_the_same_in_both_directions() {
+        // The boundary of the numeric rule: zero is false, the smallest
+        // positive and the smallest negative value are already true — as a
+        // number and as a string.
+        for value in [json!(0), json!(0i64), json!(0u64), json!(0.0)] {
+            assert!(!de_flag(&value).unwrap(), "{value} is zero");
+        }
+        for value in [
+            json!(1),
+            json!(-1),
+            json!(1u64),
+            json!(1.0),
+            json!(0.5),
+            json!(-0.5),
+            json!(2),
+            json!(i64::MAX),
+            json!(u64::MAX),
+        ] {
+            assert!(de_flag(&value).unwrap(), "{value} is not zero");
+        }
+
+        // String forms: identical answers to the numbers above.
+        assert!(!de_flag(json!("0")).unwrap());
+        assert!(!de_flag(json!("00")).unwrap());
+        assert!(!de_flag(json!("0.0")).unwrap());
+        assert!(!de_flag(json!(" -0 ")).unwrap());
+        assert!(de_flag(json!("1")).unwrap());
+        assert!(de_flag(json!("01")).unwrap());
+        assert!(de_flag(json!("+1")).unwrap());
+        assert!(de_flag(json!("-1")).unwrap());
+        assert!(de_flag(json!("2")).unwrap());
+        assert!(de_flag(json!("0.5")).unwrap());
+        assert!(de_flag(json!("1e3")).unwrap());
+        assert!(de_flag(json!(" 1 ")).unwrap());
+        assert!(de_flag(json!("18446744073709551615")).unwrap());
+    }
+
+    #[test]
+    fn every_flag_word_is_case_insensitive() {
+        for value in ["true", "TRUE", "True", "TrUe", "yes", "YES", "Yes", " yes "] {
+            assert!(de_flag(json!(value)).unwrap(), "{value} is set");
+        }
+        for value in ["false", "FALSE", "False", "no", "NO", "No", " no "] {
+            assert!(!de_flag(json!(value)).unwrap(), "{value} is clear");
+        }
+    }
+
+    #[test]
+    fn an_absent_flag_is_false_but_an_unreadable_one_is_an_error() {
+        assert!(!de_flag(json!(null)).unwrap());
+        assert!(!de_flag(json!("")).unwrap());
+        assert!(!de_flag(json!("   ")).unwrap());
+
+        // Just outside the rule: these used to decode as `false`, which is how
+        // a billed C4 envelope disappeared.
+        for value in ["y", "Y", "n", "on", "off", "2 fasle", "1.0.0", "NaN", "inf"] {
+            assert!(
+                de_flag(json!(value)).is_err(),
+                "{value:?} must be refused, not guessed"
+            );
+        }
+
+        // A token that cannot be a flag at all is refused too, never `false`.
+        assert!(de_flag(json!({"c4": 1})).is_err());
+        assert!(de_flag(json!([1])).is_err());
+    }
+
+    #[test]
+    fn the_flag_error_names_the_value_and_the_expected_spellings() {
+        let error = de_flag::<serde_json::Value>(json!("y")).expect_err("refused");
+        let text = error.to_string();
+        assert!(text.contains('y'), "{text}");
+        assert!(text.contains("true/false"), "{text}");
     }
 
     #[test]

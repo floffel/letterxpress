@@ -302,6 +302,82 @@ async fn a_job_list_without_pagination_still_decodes() {
 }
 
 // ---------------------------------------------------------------------------
+// Flag boundary: numbers and strings share one rule
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_numeric_flag_and_its_string_form_mean_the_same_thing() {
+    // The boundary of the numeric rule, as a number and as a string: zero is
+    // the only "not requested"; one, two, `01` and `+1` are all requested.
+    let cases = [
+        ("0", false),
+        ("1", true),
+        ("2", true),
+        ("-1", true),
+        ("\"0\"", false),
+        ("\"00\"", false),
+        ("\"0.0\"", false),
+        ("\"1\"", true),
+        ("\"01\"", true),
+        ("\"+1\"", true),
+        ("\"2\"", true),
+        ("true", true),
+        ("false", false),
+        ("\"yes\"", true),
+        ("\"NO\"", false),
+        ("null", false),
+        ("\"\"", false),
+    ];
+
+    for (raw, expected) in cases {
+        let client = client_for(
+            200,
+            &format!(
+                r#"{{"status":200,"data":{{"id":1,"c4":{raw},"bank_form":{raw},"items":[]}}}}"#
+            ),
+        );
+        let job = client
+            .print_job(&JobId::new("1").expect("id"))
+            .await
+            .expect("job");
+        assert_eq!(job.c4, expected, "c4 = {raw}");
+        assert_eq!(job.bank_form, expected, "bank_form = {raw}");
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_flag_fails_closed_on_a_read() {
+    let client = client_for(200, r#"{"status":200,"data":{"id":1,"c4":"y","items":[]}}"#);
+    let error = client
+        .print_job(&JobId::new("1").expect("id"))
+        .await
+        .expect_err("an unreadable flag must not decode as \"not requested\"");
+
+    assert!(matches!(
+        error,
+        Error::UnexpectedShape {
+            endpoint: "GET /v3/printjobs/{id}",
+            ..
+        }
+    ));
+    assert!(error.to_string().contains("flag"), "{error}");
+    assert!(!error.is_retryable(), "the same bytes decode the same way");
+    assert!(!error.is_ambiguous());
+}
+
+#[tokio::test]
+async fn an_unreadable_flag_on_a_billed_submit_is_ambiguous() {
+    let client = client_for(200, r#"{"status":200,"data":{"id":7,"c4":"y","items":[]}}"#);
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+
+    assert!(error.is_ambiguous(), "the job may exist and be billed");
+    assert!(!error.is_retryable(), "never resubmit what may be billed");
+}
+
+// ---------------------------------------------------------------------------
 // Transport boundaries
 // ---------------------------------------------------------------------------
 

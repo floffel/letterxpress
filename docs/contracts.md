@@ -168,7 +168,7 @@ bulk-cancel endpoint. Cancellation is `DELETE` on the job within 15 minutes.
 | `shipping` | `national`/`international`/`auto` | verified |
 | `mode` | `simplex`/`duplex` | verified |
 | `color` | `"1"`/`"4"` | verified |
-| `c4` | number `0`/`1` | verified |
+| `c4` | number `0`/`1` | verified; this crate applies one flag rule to every JSON type — any non-zero number, `"1"`, `"true"`, `"yes"` are `true`, `0`, `"0"`, `"false"`, `"no"`, `null` are `false`, and an unreadable token fails the decode instead of defaulting to `false` |
 | `registered` | `"r1"`/`"r2"`/`null` | verified; the p. 15 example prints `r1` **without quotes** — malformed JSON in the document, treated as a string |
 | `bank_form` | number `0`/`1` | verified |
 | `notice` | string/null | verified |

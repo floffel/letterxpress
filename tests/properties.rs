@@ -166,6 +166,35 @@ proptest! {
         let _ = letterxpress::EmailJobSubmission::parse(value);
     }
 
+    /// A flag means the same thing as a number and as its decimal string, and
+    /// zero is the only `false` — the rule that used to hold for numbers only.
+    #[test]
+    fn a_flag_is_zero_or_not_for_numbers_and_strings(value in any::<i64>()) {
+        let as_number: letterxpress::PrintJob =
+            serde_json::from_str(&format!(r#"{{"id":1,"c4":{value}}}"#))
+                .expect("a number flag always decodes");
+        let as_string: letterxpress::PrintJob =
+            serde_json::from_str(&serde_json::json!({"id": 1, "c4": value.to_string()}).to_string())
+                .expect("its string form decodes the same way");
+
+        prop_assert_eq!(as_number.c4, value != 0);
+        prop_assert_eq!(as_string.c4, as_number.c4);
+    }
+
+    /// A token outside the flag rule is refused, never quietly read as `false`.
+    #[test]
+    fn a_token_outside_the_flag_rule_is_refused(token in "[^0-9A-Za-z+-]{1,6}") {
+        if token.chars().all(char::is_whitespace) {
+            // Whitespace alone is "not supplied", like null.
+            return Ok(());
+        }
+        let body = serde_json::json!({"id": 1, "c4": token}).to_string();
+        prop_assert!(
+            serde_json::from_str::<letterxpress::PrintJob>(&body).is_err(),
+            "{token:?} must not decode as a flag"
+        );
+    }
+
     /// Every colour/print-mode/shipping combination produces a valid
     /// specification with the documented wire values.
     #[test]
