@@ -352,7 +352,8 @@ impl EmailDelivery {
     ///
     /// [`Error::Validation`] when `receiver` is not a plausible e-mail address
     /// (missing `@`, empty local part or domain, whitespace, control
-    /// characters, longer than 254 characters).
+    /// characters, a domain label longer than 63 bytes, or an address longer
+    /// than 254 bytes).
     ///
     /// ```
     /// use letterxpress::{EmailDelivery, EmailOption};
@@ -1667,6 +1668,12 @@ pub(crate) fn validate_email(field: &'static str, value: &str) -> Result<(), Err
             "the domain must contain a dot and no empty label",
         ));
     }
+    if domain.split('.').any(|label| label.len() > 63) {
+        return Err(Error::invalid(
+            field,
+            "each domain label must be 1 to 63 bytes",
+        ));
+    }
     Ok(())
 }
 
@@ -1724,6 +1731,21 @@ mod tests {
         let long_address = format!("a@{}", "b".repeat(253));
         assert!(EmailDelivery::new(long_address, EmailOption::MailDirect).is_err());
         assert!(EmailDelivery::new("kunde@example.de", EmailOption::MailDirect).is_ok());
+    }
+
+    #[test]
+    fn email_domain_labels_are_bounded_at_63_bytes() {
+        let accepted = format!("a@{}.de", "b".repeat(63));
+        assert!(EmailDelivery::new(accepted, EmailOption::MailDirect).is_ok());
+
+        let rejected = format!("a@{}.de", "b".repeat(64));
+        assert!(matches!(
+            EmailDelivery::new(rejected, EmailOption::MailDirect),
+            Err(Error::Validation {
+                field: "letter.email_letter.email_receiver",
+                ..
+            })
+        ));
     }
 
     #[test]
