@@ -16,6 +16,75 @@ fn client_for(status: u16, body: &str) -> Client<MockTransport> {
     client_with(vec![Response::json_response(status, body.to_string())])
 }
 
+fn client_for_with_retry_after(status: u16, body: String) -> Client<MockTransport> {
+    client_with(vec![Response::new(
+        status,
+        [("Retry-After".to_string(), "30".to_string())],
+        body.into_bytes(),
+    )])
+}
+
+fn expected_status_error(status: u16) -> Error {
+    match status {
+        401 => Error::Unauthorized {
+            message: String::new(),
+        },
+        403 => Error::Forbidden {
+            message: String::new(),
+        },
+        404 => Error::NotFound {
+            message: String::new(),
+        },
+        405 => Error::MethodNotAllowed {
+            message: String::new(),
+        },
+        429 => Error::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        },
+        500..=599 => Error::Upstream {
+            status,
+            message: String::new(),
+        },
+        400..=499 => Error::Rejected {
+            status,
+            message: String::new(),
+        },
+        _ => Error::UnexpectedShape {
+            endpoint: "GET /v3/balance",
+            message: String::new(),
+        },
+    }
+}
+
+fn assert_same_classification(actual: &Error, expected: &Error, context: &str) {
+    assert_eq!(
+        std::mem::discriminant(actual),
+        std::mem::discriminant(expected),
+        "{context}: {actual:?} != {expected:?}"
+    );
+    assert_eq!(actual.status(), expected.status(), "{context}: status");
+    assert_eq!(
+        actual.is_retryable(),
+        expected.is_retryable(),
+        "{context}: retryable"
+    );
+    assert_eq!(
+        actual.is_retryable_for(true),
+        expected.is_retryable_for(true),
+        "{context}: retryable for an idempotent request"
+    );
+    assert_eq!(
+        actual.is_ambiguous(),
+        expected.is_ambiguous(),
+        "{context}: ambiguous"
+    );
+    assert_eq!(
+        actual.retry_after(),
+        expected.retry_after(),
+        "{context}: retry-after"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Response boundaries
 // ---------------------------------------------------------------------------
@@ -199,6 +268,57 @@ async fn rate_limit_without_a_retry_after_header_still_maps() {
     match client.balance().await.expect_err("must fail") {
         Error::RateLimited { retry_after } => assert_eq!(retry_after, None),
         other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_body_level_rate_limit_on_submit_stays_retryable() {
+    let client = client_for_with_retry_after(
+        200,
+        r#"{"status":429,"message":"Too Many Requests"}"#.to_string(),
+    );
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+
+    assert!(error.is_retryable());
+    assert!(!error.is_ambiguous());
+    assert_eq!(error.status(), Some(429));
+    match error {
+        Error::RateLimited { retry_after } => {
+            assert_eq!(retry_after, Some(std::time::Duration::from_secs(30)));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_body_level_rate_limit_without_a_retry_after_header_still_maps() {
+    let client = client_for(200, r#"{"status":429,"message":"Too Many Requests"}"#);
+    match client.balance().await.expect_err("must fail") {
+        Error::RateLimited { retry_after } => assert_eq!(retry_after, None),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn every_4xx_and_5xx_has_the_same_body_and_http_classification() {
+    for status in 400..=599 {
+        let http =
+            client_for_with_retry_after(status, format!(r#"{{"message":"status {status}"}}"#));
+        let body = client_for_with_retry_after(
+            200,
+            format!(r#"{{"status":{status},"message":"status {status}"}}"#),
+        );
+        let http_error = http.balance().await.expect_err("HTTP status must fail");
+        let body_error = body.balance().await.expect_err("body status must fail");
+        let expected = expected_status_error(status);
+        let context = format!("status {status}");
+
+        assert_same_classification(&http_error, &expected, &format!("{context} over HTTP"));
+        assert_same_classification(&body_error, &expected, &format!("{context} in the body"));
+        assert_same_classification(&body_error, &http_error, &format!("{context} parity"));
     }
 }
 

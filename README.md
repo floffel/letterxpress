@@ -132,14 +132,14 @@ the request exactly once and never retries it.
 
 | Failure | What it means | What to do |
 | --- | --- | --- |
-| `Error::RateLimited` | 429, rejected before processing | retry after `Retry-After` |
+| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | retry after `Retry-After` |
 | `Error::Transport { kind: Connect, .. }` | nothing was written | safe to retry |
 | `Error::Transport { kind: Timeout \| Io, .. }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::UnexpectedStatus` on a **submit** (1xx/3xx) | promoted to `Error::Ambiguous` — the request may have been processed; redirects are not followed | reconcile, then resubmit |
 | `Error::Json` / `MissingField` / `UnexpectedShape` on a **submit** (2xx with an undecodable body) | promoted to `Error::Ambiguous` — the job exists, its tracking data does not decode | reconcile (list `print_jobs`), then resubmit only if absent |
 | `Error::Ambiguous` | the letter may already exist | list `print_jobs` and look for your `notice` |
-| `Error::Rejected` (4xx) | the body was refused | fix the input |
+| `Error::Rejected` (4xx other than 429) | the body was refused | fix the input |
 
 `is_retryable_for(idempotent)` answers the retry question for the request that
 failed: a 429, a connection that never reached the provider, and — for a read,

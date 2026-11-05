@@ -285,19 +285,22 @@ pub enum Error {
         message: String,
     },
 
-    /// The documented limit of 120 requests per minute was hit (HTTP 429).
+    /// The documented limit of 120 requests per minute was hit, either as an
+    /// HTTP 429 or as a body-level `status` of 429 when the HTTP status was
+    /// 2xx.
     ///
     /// Retrying is safe: the provider rejected the request before processing
-    /// it. `retry_after` is the `Retry-After` header when the provider sent a
-    /// parseable one.
+    /// it. `retry_after` is the `Retry-After` response header when the provider
+    /// sent a parseable one, whichever path carried the 429.
     #[error("letterxpress rate limit reached{}", retry_suffix(.retry_after))]
     RateLimited {
         /// `Retry-After` as a duration, when present and parseable.
         retry_after: Option<Duration>,
     },
 
-    /// The provider refused the request body (HTTP 400, or a body `status`
-    /// in the 4xx range). Nothing was created.
+    /// The provider refused the request body (HTTP 400, or a body `status` in
+    /// the 4xx range other than codes with their own variant, such as 401,
+    /// 403, 404, 405 and 429). Nothing was created.
     #[error("letterxpress rejected the request (http {status}): {message}")]
     Rejected {
         /// HTTP status, or the body `status` when the HTTP status was 2xx.
@@ -406,8 +409,8 @@ pub enum Error {
     /// `serde_json` error has no slot for one. When the client decodes a
     /// response, a non-JSON body is `Json` only for a 2xx — a non-2xx with an
     /// unreadable body (a proxy's HTML page, say) is classified by its HTTP
-    /// status instead and reported as [`Error::Rejected`] or
-    /// [`Error::Upstream`], which do carry the code.
+    /// status instead and reported as [`Error::Rejected`], [`Error::RateLimited`]
+    /// or [`Error::Upstream`], which do carry the code.
     #[error("invalid JSON in response: {source}")]
     Json {
         /// The underlying `serde_json` error, with line and column.
