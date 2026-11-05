@@ -664,7 +664,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Connect,
-                message: "dns".into(),
+                source: Box::new(std::io::Error::other("dns")),
             },
             None,
             true,
@@ -673,7 +673,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Timeout,
-                message: "timeout".into(),
+                source: Box::new(std::io::Error::other("timeout")),
             },
             None,
             true,
@@ -682,7 +682,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Io,
-                message: "reset".into(),
+                source: Box::new(std::io::Error::other("reset")),
             },
             None,
             true,
@@ -691,7 +691,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Transport {
                 kind: TransportKind::Protocol,
-                message: "adapter".into(),
+                source: Box::new(std::io::Error::other("adapter")),
             },
             None,
             false,
@@ -736,7 +736,7 @@ fn every_error_variant_renders_and_classifies() {
         (
             Error::Base64 {
                 field: "invoice.base64_data",
-                message: "bad".into(),
+                source: base64::DecodeError::InvalidByte(0, b'!'),
             },
             None,
             false,

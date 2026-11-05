@@ -504,7 +504,7 @@ async fn a_submit_timeout_is_ambiguous_and_sent_once() {
     let recorder = letterxpress::transport::RecordingTransport::new(MockTransport::new([Err(
         Error::Transport {
             kind: TransportKind::Timeout,
-            message: "operation timed out".into(),
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
         },
     )]));
     let client = Client::new(
@@ -531,7 +531,7 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Connect,
-            message: "dns failure".into(),
+            source: Box::new(std::io::Error::other("dns failure")),
         })]),
         Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
     );
@@ -550,7 +550,7 @@ async fn a_read_timeout_stays_retryable() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Timeout,
-            message: "timed out".into(),
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
         })]),
         Credentials::new("kunde", "key", Mode::Test).expect("credentials"),
     );
@@ -1241,6 +1241,44 @@ fn invoice_pdf_and_journal_csv_report_missing_payloads() {
     let journal: letterxpress::Journal =
         serde_json::from_str(r#"{"csv_base64":"////"}"#).expect("journal");
     assert!(matches!(journal.csv(), Err(Error::Utf8 { .. })));
+}
+
+#[test]
+fn a_decodable_payload_keeps_the_decoder_error_reachable() {
+    use base64::Engine as _;
+
+    // The valid value.
+    let document: letterxpress::InvoiceDocument =
+        serde_json::from_str(r#"{"id":1,"base64_data":"JVBERi0xLjQ="}"#).expect("invoice");
+    assert_eq!(
+        document.pdf().expect("a valid payload decodes"),
+        b"%PDF-1.4"
+    );
+
+    // Just outside it: one illegal symbol. The decoder's own error survives as
+    // the `source`, so a caller can branch on the failure instead of parsing
+    // the rendered sentence.
+    let encoded = "JVBERi0xLjQ!";
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect_err("the fixture must be invalid base64");
+    let document: letterxpress::InvoiceDocument =
+        serde_json::from_str(&format!(r#"{{"id":1,"base64_data":"{encoded}"}}"#)).expect("invoice");
+    let error = document.pdf().expect_err("an illegal symbol must fail");
+
+    let Error::Base64 { field, source } = &error else {
+        panic!("expected Error::Base64, got {error:?}");
+    };
+    assert_eq!(*field, "invoice.base64_data");
+    assert_eq!(*source, expected, "the decoder's error, not its text");
+    assert_eq!(
+        error.to_string(),
+        format!("invalid base64 in `invoice.base64_data`: {source}")
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the cause is reachable, not flattened"
+    );
 }
 
 #[tokio::test]

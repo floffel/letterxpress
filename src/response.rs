@@ -375,10 +375,9 @@ pub(crate) fn decode_base64(field: &'static str, encoded: &str) -> Result<Vec<u8
             max: max_encoded,
         });
     }
-    let bytes = STANDARD.decode(trimmed).map_err(|error| Error::Base64 {
-        field,
-        message: error.to_string(),
-    })?;
+    let bytes = STANDARD
+        .decode(trimmed)
+        .map_err(|source| Error::Base64 { field, source })?;
     if bytes.len() > crate::MAX_PDF_BYTES {
         return Err(Error::TooLarge {
             field,

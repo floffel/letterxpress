@@ -499,10 +499,12 @@ impl Transport for MockTransport {
             Some(result) => result,
             None => Err(Error::Transport {
                 kind: TransportKind::Protocol,
-                message: format!(
+                // `io::Error::other` is the standard way to carry a one-off
+                // message with an `Error` impl; the mock has no deeper cause.
+                source: Box::new(std::io::Error::other(format!(
                     "mock transport has no scripted response left for {} {}",
                     request.method, request.url
-                ),
+                ))),
             }),
         }
     }
@@ -777,8 +779,8 @@ impl ReqwestTransport {
     /// # }
     /// ```
     pub fn new() -> Result<Self> {
-        let client = build_reqwest_client(reqwest::Client::builder())
-            .map_err(|error| describe_reqwest_error(&error))?;
+        let client =
+            build_reqwest_client(reqwest::Client::builder()).map_err(describe_reqwest_error)?;
         Ok(Self { client })
     }
 
@@ -814,16 +816,13 @@ impl Transport for ReqwestTransport {
             builder = builder.body(body);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| describe_reqwest_error(&error))?;
+        let response = builder.send().await.map_err(describe_reqwest_error)?;
         let status = response.status().as_u16();
         let headers = collect_response_headers(response.headers());
         let body = response
             .bytes()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?
+            .map_err(describe_reqwest_error)?
             .to_vec();
 
         Ok(Response::new(status, headers, body))
@@ -854,8 +853,12 @@ fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String
 
 /// Maps a `reqwest` failure to a typed transport error without echoing the
 /// request body (which carries the API key).
+///
+/// The error is moved into the variant rather than formatted: `reqwest::Error`
+/// keeps the hyper/rustls cause, and that chain is what tells DNS from TLS from
+/// a reset. Its `Display` renders the URL but never the body or the headers.
 #[cfg(feature = "http")]
-fn describe_reqwest_error(error: &reqwest::Error) -> Error {
+fn describe_reqwest_error(error: reqwest::Error) -> Error {
     let kind = if error.is_timeout() {
         TransportKind::Timeout
     } else if error.is_connect() {
@@ -865,10 +868,9 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
     } else {
         TransportKind::Io
     };
-    // `reqwest::Error` renders the URL but never the request body or headers.
     Error::Transport {
         kind,
-        message: error.to_string(),
+        source: Box::new(error),
     }
 }
 
@@ -995,7 +997,7 @@ mod tests {
     /// builder, so a failing builder is reachable from a test.
     #[cfg(feature = "http")]
     fn built_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
-        build_reqwest_client(builder).map_err(|error| describe_reqwest_error(&error))
+        build_reqwest_client(builder).map_err(describe_reqwest_error)
     }
 
     #[cfg(feature = "http")]
@@ -1051,6 +1053,38 @@ mod tests {
                 })
             ),
             "the first illegal header byte must fail closed, got {outside:?}"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_reqwest_failure_stays_in_the_source_chain() {
+        // The reported defect on the real transport: the `reqwest` failure was
+        // flattened into a string at the boundary, so nothing above could tell
+        // DNS from TLS from a builder fault by type. It is now the variant's
+        // `source`.
+        let Err(error) = built_client(reqwest::Client::builder().user_agent("letterxpress\u{7f}"))
+        else {
+            panic!("a control character in a header value must fail");
+        };
+        assert!(matches!(
+            &error,
+            Error::Transport {
+                kind: TransportKind::Protocol,
+                ..
+            }
+        ));
+        let Some(source) = std::error::Error::source(&error) else {
+            panic!("the reqwest error must stay reachable");
+        };
+        assert!(
+            source.downcast_ref::<reqwest::Error>().is_some(),
+            "the chain carries `reqwest::Error` itself, not its rendering"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("transport error (protocol): {source}"),
+            "`Display` is rendered from the source"
         );
     }
 
