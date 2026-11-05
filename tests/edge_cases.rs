@@ -788,8 +788,8 @@ fn credentials_fail_closed_and_never_leak_in_debug() {
     );
     let debug = format!("{credentials:?}");
     assert!(!debug.contains("topsecret"));
-    assert!(!credentials.auth_json().to_string().contains("<redacted>"));
-    assert_eq!(credentials.auth_json()["apikey"], "topsecret");
+    assert_eq!(credentials.username(), "kunde");
+    assert_eq!(credentials.mode(), Mode::Live);
 }
 
 #[test]

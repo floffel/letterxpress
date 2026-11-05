@@ -1366,7 +1366,8 @@ impl<T: Transport> Client<T> {
             }
             None => Map::new(),
         };
-        body.insert("auth".to_string(), self.credentials.auth_json());
+        let auth = serde_json::to_value(self.credentials.auth_payload()).map_err(Error::from)?;
+        body.insert("auth".to_string(), auth);
         let payload = serde_json::to_vec(&Value::Object(body)).map_err(Error::from)?;
 
         let request = Request::new(method, url, Some(payload))
