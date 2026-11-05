@@ -252,6 +252,7 @@ fn http_error(
         _ => Some(Error::UnexpectedShape {
             endpoint,
             message: format!("unexpected HTTP status {status}: {text}"),
+            source: None,
         }),
     }
 }

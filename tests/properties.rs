@@ -74,6 +74,7 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
         Error::UnexpectedShape {
             endpoint: "GET /v3/balance",
             message: text.into(),
+            source: None,
         },
         Error::TooLarge {
             field: "letter.base64_file",
@@ -594,6 +595,7 @@ fn unreadable_json_and_the_wrong_shape_share_one_stance() {
     let shape = Error::UnexpectedShape {
         endpoint: "GET /v3/balance",
         message: "expected an object, got an array".into(),
+        source: None,
     };
 
     assert_eq!(stance(&constructed), stance(&converted));

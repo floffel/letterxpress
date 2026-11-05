@@ -718,6 +718,7 @@ fn every_error_variant_renders_and_classifies() {
             Error::UnexpectedShape {
                 endpoint: "GET /v3/x",
                 message: "nope".into(),
+                source: None,
             },
             None,
             false,

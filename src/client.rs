@@ -1132,12 +1132,8 @@ impl<T: Transport> Client<T> {
         let data = envelope
             .require_data(endpoint)
             .map_err(promote_to_ambiguous)?;
-        EmailJobSubmission::parse(data).map_err(|error| {
-            promote_to_ambiguous(Error::UnexpectedShape {
-                endpoint,
-                message: error.to_string(),
-            })
-        })
+        EmailJobSubmission::parse(data)
+            .map_err(|source| promote_to_ambiguous(unexpected_shape(endpoint, source)))
     }
 
     /// `GET /v3/emailjobs` — one page of e-mail jobs.
@@ -1166,10 +1162,7 @@ impl<T: Transport> Client<T> {
             .await?;
         let pagination = envelope.pagination.clone();
         let data = envelope.require_data(endpoint)?;
-        EmailJobPage::parse(data, pagination).map_err(|error| Error::UnexpectedShape {
-            endpoint,
-            message: error.to_string(),
-        })
+        EmailJobPage::parse(data, pagination).map_err(|source| unexpected_shape(endpoint, source))
     }
 
     /// `GET /v3/emailjobs/{id}`.
@@ -1488,7 +1481,9 @@ fn promote_to_ambiguous(error: Error) -> Error {
         Error::MissingField { field, .. } => Error::Ambiguous {
             message: format!("provider answered 2xx without `{field}`: the job may exist"),
         },
-        Error::UnexpectedShape { endpoint, message } => Error::Ambiguous {
+        Error::UnexpectedShape {
+            endpoint, message, ..
+        } => Error::Ambiguous {
             message: format!(
                 "provider answered 2xx for `{endpoint}` with an undecodable body: {message}"
             ),
@@ -1497,13 +1492,19 @@ fn promote_to_ambiguous(error: Error) -> Error {
     }
 }
 
+/// Builds the typed shape error while keeping the decoder's cause reachable.
+fn unexpected_shape(endpoint: &'static str, source: serde_json::Error) -> Error {
+    Error::UnexpectedShape {
+        endpoint,
+        message: source.to_string(),
+        source: Some(Box::new(source)),
+    }
+}
+
 /// Decodes `data` into a typed model.
 fn decode_data<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) -> Result<D> {
     let data = envelope.require_data(endpoint)?;
-    serde_json::from_value(data).map_err(|error| Error::UnexpectedShape {
-        endpoint,
-        message: error.to_string(),
-    })
+    serde_json::from_value(data).map_err(|source| unexpected_shape(endpoint, source))
 }
 
 /// Decodes `data` for a submit that has already reached the provider.
