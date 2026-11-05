@@ -635,6 +635,16 @@ fn every_error_variant_renders_and_classifies() {
             false,
         ),
         (
+            Error::UnexpectedStatus {
+                status: 302,
+                endpoint: "GET /v3/x",
+                message: "Found".into(),
+            },
+            Some(302),
+            false,
+            false,
+        ),
+        (
             Error::Ambiguous {
                 message: "timeout".into(),
             },

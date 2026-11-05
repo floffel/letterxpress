@@ -144,7 +144,8 @@ impl Envelope {
 ///
 /// [`Error::Unauthorized`], [`Error::Forbidden`], [`Error::NotFound`],
 /// [`Error::MethodNotAllowed`], [`Error::RateLimited`], [`Error::Rejected`],
-/// [`Error::Upstream`], [`Error::Json`] and [`Error::UnexpectedShape`].
+/// [`Error::Upstream`], [`Error::Json`], [`Error::UnexpectedStatus`] and
+/// [`Error::UnexpectedShape`].
 ///
 /// An empty or whitespace-only body is an envelope with no `data`, exactly like
 /// a literal `null` body. Endpoints that require a payload still report
@@ -160,6 +161,10 @@ impl Envelope {
 /// let limited = Response::new(429, [("Retry-After".to_string(), "30".to_string())], Vec::new());
 /// let error = letterxpress::parse_envelope("POST /v3/printjobs", limited).unwrap_err();
 /// assert_eq!(error.status(), Some(429));
+///
+/// let redirect = Response::new(302, std::iter::empty(), Vec::new());
+/// let error = letterxpress::parse_envelope("GET /v3/balance", redirect).unwrap_err();
+/// assert!(matches!(error, letterxpress::Error::UnexpectedStatus { status: 302, .. }));
 ///
 /// let empty = letterxpress::parse_envelope("DELETE /v3/printjobs/{id}", Response::new(204, std::iter::empty(), Vec::new()))?;
 /// assert!(empty.data().is_none());
@@ -230,8 +235,15 @@ fn http_error(
             message: text,
         }),
         200..=299 => None,
-        // 1xx/3xx: redirects are not followed, because following one would send
-        // the credential to whatever host the redirect names.
+        // Redirects are not followed, because following one would send the
+        // credential to whatever host the redirect names. The caller knows
+        // whether the request was idempotent; this layer only reports the
+        // status class.
+        100..=199 | 300..=399 => Some(Error::UnexpectedStatus {
+            status,
+            endpoint,
+            message: text,
+        }),
         _ => Some(Error::UnexpectedShape {
             endpoint,
             message: format!("unexpected HTTP status {status}: {text}"),
@@ -429,6 +441,43 @@ mod tests {
             Err(Error::Unauthorized { message }) => assert_eq!(message, "Unauthorized."),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn informational_and_redirect_statuses_are_reported_without_method_context() {
+        for status in [100, 199, 300, 399] {
+            let response = Response::json_response(status, r#"{"message":"notice"}"#);
+            let error = parse_envelope("GET /v3/balance", response).expect_err("must fail");
+            assert!(
+                matches!(&error, Error::UnexpectedStatus { status: actual, .. } if *actual == status),
+                "{status}: {error:?}"
+            );
+            assert_eq!(error.status(), Some(status));
+            assert!(!error.is_ambiguous());
+            assert!(!error.is_retryable());
+            assert!(error.to_string().contains(&status.to_string()));
+        }
+
+        for status in [200, 299] {
+            let response = Response::json_response(status, r#"{"status":200,"data":{}}"#);
+            assert!(
+                parse_envelope("GET /v3/balance", response).is_ok(),
+                "{status}"
+            );
+        }
+
+        let error = parse_envelope(
+            "POST /v3/printjobs",
+            Response::new(302, std::iter::empty(), Vec::new()),
+        )
+        .expect_err("the parser has no method context");
+        assert!(matches!(error, Error::UnexpectedStatus { status: 302, .. }));
+
+        let response = Response::json_response(400, r#"{"message":"bad"}"#);
+        assert!(matches!(
+            parse_envelope("GET /v3/balance", response),
+            Err(Error::Rejected { status: 400, .. })
+        ));
     }
 
     #[test]

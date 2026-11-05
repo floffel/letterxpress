@@ -5,8 +5,8 @@
 //! even `GET` and `DELETE` carry), sends it once, and decodes the envelope. No
 //! method retries: a submit that may have been processed returns
 //! [`Error::Ambiguous`](crate::Error::Ambiguous) instead — after a timeout, a
-//! 5xx, or a 2xx whose body does not decode — so a caller cannot double-send a
-//! letter by accident.
+//! 5xx, a 1xx/3xx answer, or a 2xx whose body does not decode — so a caller
+//! cannot double-send a letter by accident.
 //!
 //! ```no_run
 //! # #[cfg(feature = "http")]
@@ -1432,13 +1432,22 @@ fn classify_transport(error: Error, method: Method) -> Error {
     }
 }
 
-/// A failed submit is ambiguous even when the failure is on our side: a 5xx,
-/// or a 2xx whose body does not decode, leaves the job possibly created and
-/// billed. Definitive answers (4xx, auth, rate limit) stay terminal.
+/// A failed submit is ambiguous even when the failure is on our side: a 5xx, a
+/// 1xx/3xx answer, or a 2xx whose body does not decode leaves the job possibly
+/// created and billed. Definitive answers (4xx, auth, rate limit) stay terminal.
 fn promote_to_ambiguous(error: Error) -> Error {
     match error {
         Error::Upstream { status, message } => Error::Ambiguous {
             message: format!("provider answered http {status} after the submit: {message}"),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint,
+            message,
+        } => Error::Ambiguous {
+            message: format!(
+                "provider answered http {status} for `{endpoint}` after the submit; the job may exist: {message}"
+            ),
         },
         Error::Json { source } => Error::Ambiguous {
             message: format!("provider answered 2xx with a body that is not JSON: {source}"),
