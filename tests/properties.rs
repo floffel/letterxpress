@@ -354,6 +354,64 @@ proptest! {
             text
         );
     }
+
+    /// `Retry-After` round-trips through `Display`: what the wording shows is
+    /// what the caller can read back, and the seconds are `Duration::as_secs` —
+    /// a sub-second remainder is truncated, never rounded up into a retry that
+    /// would hit the limit again.
+    #[test]
+    fn the_retry_after_wording_round_trips(
+        secs in any::<u64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let rendered = letterxpress::Error::RateLimited {
+            retry_after: Some(std::time::Duration::new(secs, nanos)),
+        }
+        .to_string();
+        prop_assert_eq!(
+            &rendered,
+            &format!("letterxpress rate limit reached, retry after {secs}s")
+        );
+
+        let parsed = rendered
+            .strip_prefix("letterxpress rate limit reached, retry after ")
+            .and_then(|tail| tail.strip_suffix('s'))
+            .and_then(|digits| digits.parse::<u64>().ok());
+        prop_assert_eq!(parsed, Some(secs));
+    }
+}
+
+#[test]
+fn the_retry_after_wording_truncates_at_the_second_boundary() {
+    use std::time::Duration;
+
+    let render = |retry_after: Option<Duration>| {
+        letterxpress::Error::RateLimited { retry_after }.to_string()
+    };
+
+    // Just inside the limit: 999 999 999 ns still reports whole seconds, so it
+    // is "0s" and not "1s".
+    assert_eq!(
+        render(Some(Duration::new(0, 999_999_999))),
+        "letterxpress rate limit reached, retry after 0s"
+    );
+    // Exactly at it.
+    assert_eq!(
+        render(Some(Duration::new(1, 0))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // And just past it: the remainder is truncated, not rounded.
+    assert_eq!(
+        render(Some(Duration::new(1, 1))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // The largest representable duration renders without wrapping.
+    assert_eq!(
+        render(Some(Duration::new(u64::MAX, 999_999_999))),
+        format!("letterxpress rate limit reached, retry after {}s", u64::MAX)
+    );
+    // No `Retry-After` at all: no suffix, and in particular not "0s".
+    assert_eq!(render(None), "letterxpress rate limit reached");
 }
 
 #[test]
