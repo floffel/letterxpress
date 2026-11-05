@@ -360,14 +360,25 @@ fn body_snippet(response: &Response) -> String {
     snippet
 }
 
-/// `Retry-After` as a duration. HTTP-date values are ignored (the provider
-/// documents no format, and a wrong guess is worse than the caller's own
-/// backoff).
+/// `Retry-After` in whole seconds, clamped to
+/// [`MAX_RETRY_AFTER`](crate::MAX_RETRY_AFTER).
+///
+/// Only the delta-seconds form is honoured. HTTP-date values are ignored
+/// (the provider documents no format, and a wrong guess is worse than the
+/// caller's own backoff), and so is anything that is not a plain `u64`: a
+/// negative number, a fraction, a comma list. Negative values are refused
+/// rather than clamped to zero, because `Retry-After: -1` is not a hint to
+/// retry immediately — it is a header nobody meant to send.
+///
+/// The ceiling is applied here, where provider-controlled data enters the
+/// crate, so no decoded error carries a wait longer than five minutes. See
+/// [`MAX_RETRY_AFTER`](crate::MAX_RETRY_AFTER) for why that is the right bound
+/// for a 120-per-minute contract.
 fn parse_retry_after(response: &Response) -> Option<Duration> {
-    response
-        .header("retry-after")
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+    let seconds = response.header("retry-after")?.trim().parse::<u64>().ok()?;
+    Some(crate::error::bounded_retry_after(Duration::from_secs(
+        seconds,
+    )))
 }
 
 /// Decodes a base64 payload from a response, with the documented ceiling
@@ -558,5 +569,53 @@ mod tests {
             decode_base64("x", "!!!!"),
             Err(Error::Base64 { .. })
         ));
+    }
+
+    /// `Retry-After` is read in whole seconds and clamped at the ceiling; any
+    /// value that is not a plain count of seconds yields no hint at all.
+    #[test]
+    fn retry_after_is_bounded_at_the_ceiling_and_unreadable_values_are_dropped() {
+        fn hint(value: Option<&str>) -> Option<Duration> {
+            let headers: Vec<(String, String)> = value
+                .map(|value| vec![("Retry-After".to_string(), value.to_string())])
+                .unwrap_or_default();
+            parse_envelope("GET /v3/balance", Response::new(429, headers, Vec::new()))
+                .expect_err("429 is an error")
+                .retry_after()
+        }
+
+        // No header at all: no hint, which means back off, not retry now.
+        assert_eq!(hint(None), None);
+
+        // Zero is a legal delta-seconds value and is reported as written.
+        assert_eq!(hint(Some("0")), Some(Duration::ZERO));
+
+        // Just inside the ceiling, exactly at it, and one second past it.
+        assert_eq!(hint(Some("299")), Some(Duration::from_secs(299)));
+        assert_eq!(hint(Some("300")), Some(crate::MAX_RETRY_AFTER));
+        assert_eq!(hint(Some("301")), Some(crate::MAX_RETRY_AFTER));
+
+        // A day, and a value one above `u64::MAX` (which cannot be parsed).
+        assert_eq!(hint(Some("86400")), Some(crate::MAX_RETRY_AFTER));
+        assert_eq!(hint(Some("18446744073709551616")), None);
+
+        // Surrounding whitespace is not a reason to drop a readable header.
+        assert_eq!(hint(Some(" 45 ")), Some(Duration::from_secs(45)));
+
+        // Everything else is unreadable: an HTTP-date, a fraction, a negative
+        // number, a comma list, a unit suffix, scientific notation, an empty
+        // value.
+        for unreadable in [
+            "",
+            "   ",
+            "-1",
+            "30.5",
+            "30s",
+            "30, 60",
+            "1e3",
+            "Wed, 21 Oct 2015 07:28:00 GMT",
+        ] {
+            assert_eq!(hint(Some(unreadable)), None, "{unreadable:?}");
+        }
     }
 }

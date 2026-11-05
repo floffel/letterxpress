@@ -21,9 +21,11 @@
 //!   recovery is to look the job up (by `notice` or the job list) before
 //!   resubmitting.
 //!
-//! A retry that is allowed is not always a retry that is due: [`Error::retry_after`]
-//! carries the provider's own backoff hint when it sent one, and the crate
-//! invents no delay of its own.
+//! A `429` also carries a waiting time. [`Error::retry_after`] reports the
+//! provider's `Retry-After` bounded by [`MAX_RETRY_AFTER`], so a header cannot
+//! park a caller for hours, and `None` there means "no usable hint, back off on
+//! your own" — never "retry immediately". A retry that is allowed is not always
+//! a retry that is due: the crate invents no delay of its own.
 
 use std::time::Duration;
 
@@ -136,6 +138,44 @@ impl std::fmt::Display for TransportKind {
     }
 }
 
+/// The longest wait this crate will report for a provider `Retry-After`.
+///
+/// The documented limit is 120 requests per minute
+/// ([`RATE_LIMIT_PER_MINUTE`](crate::RATE_LIMIT_PER_MINUTE)), so a rate-limit
+/// answer asks for seconds, not for hours: a header saying `86400` describes
+/// something other than this contract — a proxy's own throttle, a misconfigured
+/// edge, or a hostile response — and honouring it verbatim parks the caller for
+/// a day. Five minutes is far above anything the contract can demand and far
+/// below anything that hurts.
+///
+/// The cap is applied where the header enters the crate and again by
+/// [`Error::retry_after`], so no path hands out an unbounded wait. Waiting the
+/// capped time is safe even when it was not enough: the next answer is another
+/// `429` with its own hint.
+///
+/// Decoding clamps, so an error this crate produced already carries at most
+/// this wait; [`Error::retry_after`] applies the cap a second time, so a value
+/// assembled by hand cannot exceed it either.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use letterxpress::{Error, MAX_RETRY_AFTER};
+///
+/// assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(300));
+///
+/// // A header an order of magnitude above the ceiling is reported at it.
+/// let err = Error::RateLimited { retry_after: Some(Duration::from_secs(86_400)) };
+/// assert_eq!(err.retry_after(), Some(MAX_RETRY_AFTER));
+/// ```
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+
+/// The wait to actually honour: the provider's value, never above
+/// [`MAX_RETRY_AFTER`].
+pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
+    wait.min(MAX_RETRY_AFTER)
+}
+
 /// The error type returned by every fallible operation in this crate.
 ///
 /// The enum is `#[non_exhaustive]`: new failure modes can appear without a
@@ -238,9 +278,9 @@ impl std::fmt::Display for TransportKind {
 /// let err = Error::RateLimited { retry_after: Some(std::time::Duration::from_secs(30)) };
 /// assert!(err.is_retryable());
 /// assert!(err.is_retryable_for(Method::Post.is_idempotent()));
-/// assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 /// assert!(!err.is_ambiguous());
 /// assert_eq!(err.status(), Some(429));
+/// assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 /// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -292,11 +332,21 @@ pub enum Error {
     /// 2xx.
     ///
     /// Retrying is safe: the provider rejected the request before processing
-    /// it. `retry_after` is the `Retry-After` response header when the provider
-    /// sent a parseable one, whichever path carried the 429.
+    /// it. `retry_after` holds the `Retry-After` header when the provider sent
+    /// a parseable one, whichever path carried the 429, clamped to
+    /// [`MAX_RETRY_AFTER`]; read the wait through [`Error::retry_after`], which
+    /// applies the same ceiling to a value built by hand.
+    ///
+    /// `None` means the provider named no usable wait — back off exponentially.
+    /// It does **not** mean "retry now": an immediate retry spends the budget
+    /// that was just exhausted, and the 120-per-minute window is refilled per
+    /// minute, not per request.
     #[error("letterxpress rate limit reached{}", retry_suffix(.retry_after))]
     RateLimited {
-        /// `Retry-After` as a duration, when present and parseable.
+        /// `Retry-After` in seconds, when the header was present and
+        /// parseable, clamped by [`MAX_RETRY_AFTER`] for every value the client
+        /// decoded. Read it through [`Error::retry_after`], which bounds a
+        /// hand-built value too.
         retry_after: Option<Duration>,
     },
 
@@ -590,17 +640,24 @@ impl Error {
     /// The delay the provider asked for before the next attempt, when it asked
     /// for one.
     ///
-    /// `Some` only on [`Error::RateLimited`] that carried a parseable
-    /// `Retry-After`; `None` on every other error, and on a rate limit without
-    /// that header. The crate invents no delay of its own, so `None` is not by
-    /// itself a licence to retry at once: decide with
-    /// [`Error::is_retryable_for`] first, and pick your own backoff when the
-    /// provider sent no hint.
+    /// `Some(wait)` only on [`Error::RateLimited`] that carried a parseable
+    /// `Retry-After`, never longer than [`MAX_RETRY_AFTER`]. Waiting it and
+    /// retrying is safe: a `429` rejects the request before processing it.
+    /// `None` on every other error, and on a rate limit without that header.
+    /// The crate invents no delay of its own, so `None` is not by itself a
+    /// licence to retry at once: decide with [`Error::is_retryable_for`] first,
+    /// and pick your own backoff when the provider sent no hint.
+    ///
+    /// The accessor is the bounded view of [`Error::RateLimited`]'s
+    /// `retry_after` field. Decoding already clamps, and the cap is applied
+    /// here a second time, so a value built by hand cannot exceed the ceiling
+    /// either: a caller that only ever reads this method cannot be parked for a
+    /// day by a header it never sees.
     ///
     /// ```
     /// use std::time::Duration;
     ///
-    /// use letterxpress::Error;
+    /// use letterxpress::{Error, MAX_RETRY_AFTER};
     ///
     /// let limited = Error::RateLimited { retry_after: Some(Duration::from_secs(30)) };
     /// assert!(limited.is_retryable_for(true));
@@ -610,13 +667,17 @@ impl Error {
     /// assert!(no_hint.is_retryable_for(true));
     /// assert_eq!(no_hint.retry_after(), None, "no hint is not no wait");
     ///
+    /// // The provider asked for an hour: honour the ceiling, not the hour.
+    /// let absurd = Error::RateLimited { retry_after: Some(Duration::from_secs(3600)) };
+    /// assert_eq!(absurd.retry_after(), Some(MAX_RETRY_AFTER));
+    ///
     /// let gone = Error::NotFound { message: "gone".into() };
     /// assert_eq!(gone.retry_after(), None);
     /// ```
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after } => *retry_after,
+            Self::RateLimited { retry_after } => (*retry_after).map(bounded_retry_after),
             _ => None,
         }
     }
@@ -682,11 +743,27 @@ impl Error {
 }
 
 /// `Retry-After` rendered for `Display`, or nothing when it is unknown.
+///
+/// The seconds shown are the wait a caller may act on, so the value is bounded
+/// by [`MAX_RETRY_AFTER`] and the line always agrees with
+/// [`Error::retry_after`]. A provider that asked for longer — possible only for
+/// a hand-built value, decoding already clamps — is named as well, so a log
+/// line does not silently rewrite what it said.
 #[allow(clippy::ref_option)]
 fn retry_suffix(retry_after: &Option<Duration>) -> String {
-    retry_after.map_or_else(String::new, |duration| {
-        format!(", retry after {}s", duration.as_secs())
-    })
+    let Some(raw) = *retry_after else {
+        return String::new();
+    };
+    let wait = bounded_retry_after(raw);
+    if wait == raw {
+        format!(", retry after {}s", wait.as_secs())
+    } else {
+        format!(
+            ", retry after {}s (capped from {}s)",
+            wait.as_secs(),
+            raw.as_secs()
+        )
+    }
 }
 
 #[cfg(test)]

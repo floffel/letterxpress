@@ -9,7 +9,7 @@ use letterxpress::transport::{Method, MockTransport, Response, Transport};
 use letterxpress::{
     Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus, Letter, Mode,
     Money, MoneyError, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
-    MAX_PDF_BYTES,
+    MAX_PDF_BYTES, MAX_RETRY_AFTER,
 };
 
 fn client_for(status: u16, body: &str) -> Client<MockTransport> {
@@ -355,6 +355,77 @@ async fn rate_limit_without_a_retry_after_header_still_maps() {
     match client.balance().await.expect_err("must fail") {
         Error::RateLimited { retry_after } => assert_eq!(retry_after, None),
         other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The provider's `Retry-After` is honoured as written up to the ceiling and
+/// clamped at it — a header cannot park a caller for hours.
+#[tokio::test]
+async fn retry_after_is_honoured_up_to_the_ceiling_and_clamped_past_it() {
+    use std::time::Duration;
+
+    for (header, expected) in [
+        ("299", Some(Duration::from_secs(299))), // just inside the ceiling
+        ("300", Some(MAX_RETRY_AFTER)),          // exactly at it
+        ("301", Some(MAX_RETRY_AFTER)),          // just outside it
+        ("86400", Some(MAX_RETRY_AFTER)),        // a day: clamped, not obeyed
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None), // HTTP-date: no usable hint
+        ("garbage", None),
+    ] {
+        let client = client_with(vec![Response::new(
+            429,
+            [("Retry-After".to_string(), header.to_string())],
+            fixture("synthetic_rate_limited.json").into_bytes(),
+        )]);
+        let error = client.balance().await.expect_err("must fail");
+        assert!(error.is_retryable(), "{header}");
+        assert_eq!(error.retry_after(), expected, "{header}");
+
+        // Decoding already bounds the value, so nothing needs the "capped"
+        // note and a log line never shows a wait longer than the ceiling.
+        let wording = error.to_string();
+        assert!(!wording.contains("capped from"), "{wording}");
+    }
+}
+
+/// A rate-limit error built by hand is bounded by the accessor and named as
+/// capped in its wording, so neither path hands out an unbounded wait.
+#[test]
+fn a_hand_built_rate_limit_is_capped_by_the_accessor() {
+    use std::time::Duration;
+
+    let absurd = Error::RateLimited {
+        retry_after: Some(Duration::from_secs(86_400)),
+    };
+    assert_eq!(absurd.retry_after(), Some(MAX_RETRY_AFTER));
+    assert!(absurd.to_string().contains("retry after 300s"));
+    assert!(absurd.to_string().contains("capped from 86400s"));
+
+    // At or below the ceiling nothing is rewritten.
+    let inside = Error::RateLimited {
+        retry_after: Some(MAX_RETRY_AFTER),
+    };
+    assert_eq!(inside.retry_after(), Some(MAX_RETRY_AFTER));
+    assert_eq!(
+        inside.to_string(),
+        "letterxpress rate limit reached, retry after 300s"
+    );
+
+    // No hint: no suffix, and the accessor has nothing to offer.
+    let bare = Error::RateLimited { retry_after: None };
+    assert_eq!(bare.retry_after(), None);
+    assert_eq!(bare.to_string(), "letterxpress rate limit reached");
+
+    // Only a rate limit carries a wait.
+    for terminal in [
+        Error::NotFound {
+            message: "gone".into(),
+        },
+        Error::Ambiguous {
+            message: "timeout".into(),
+        },
+    ] {
+        assert_eq!(terminal.retry_after(), None, "{terminal:?}");
     }
 }
 
