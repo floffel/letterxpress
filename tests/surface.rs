@@ -107,7 +107,10 @@ async fn get_print_job_uses_the_documented_path() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Get);
-    assert_eq!(request.path_and_query().as_deref(), Some("/v3/printjobs/42"));
+    assert_eq!(
+        request.path_and_query().as_deref(),
+        Some("/v3/printjobs/42")
+    );
 }
 
 #[tokio::test]
