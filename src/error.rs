@@ -68,7 +68,10 @@ impl TransportKind {
     /// ```
     #[must_use]
     pub fn is_retryable(self) -> bool {
-        !matches!(self, Self::Protocol)
+        match self {
+            Self::Connect | Self::Timeout | Self::Io => true,
+            Self::Protocol => false,
+        }
     }
 }
 
@@ -91,30 +94,73 @@ impl std::fmt::Display for TransportKind {
 ///
 /// # Retry stance per variant
 ///
-/// | Variant | `is_retryable` | `is_ambiguous` |
-/// | --- | --- | --- |
-/// | [`Error::Validation`] | no — fix the input | no |
-/// | [`Error::Unauthorized`] / [`Error::Forbidden`] | no — fix the credentials | no |
-/// | [`Error::NotFound`] / [`Error::MethodNotAllowed`] | no | no |
-/// | [`Error::RateLimited`] | yes, after `Retry-After` | no |
-/// | [`Error::Rejected`] | no — the provider refused the body | no |
-/// | [`Error::Upstream`] | no (see below) | no |
-/// | [`Error::Ambiguous`] | **no** — reconcile first | yes |
-/// | [`Error::Transport`] | per [`TransportKind`] | no |
-/// | [`Error::Json`] / [`Error::MissingField`] / [`Error::UnexpectedShape`] | no | no |
-/// | [`Error::UnexpectedStatus`] | no | no |
-/// | [`Error::TooLarge`] / [`Error::Base64`] | no | no |
+/// One row per variant; [`Error::Transport`] is split by [`TransportKind`]
+/// because the kind is what decides. This table *is* the contract:
+/// [`Error::status`], [`Error::is_retryable`] and [`Error::is_ambiguous`] answer
+/// for every variant exactly as listed, and the test module at the end of this
+/// file asserts the code and the text of the table against each other, so a
+/// variant cannot arrive without a documented stance.
 ///
-/// `Upstream` reports a 5xx *answer*, so the server is talking and the request
-/// failed there. For a read it is safe to try again; for a submit the 5xx may
-/// arrive after the job was created, which is why the client turns a 5xx on a
-/// submit into [`Error::Ambiguous`] instead of `Upstream`. A caller that
-/// deliberately retries a failed read gets `Upstream` and decides for itself.
+/// In the `status()` column, `none` means the error carries no HTTP status and
+/// `carried` means the code the response had is reported back.
 ///
-/// The same holds for the decode variants: a 2xx on a submit means the job was
-/// accepted and billed, so `Json`, `MissingField` and `UnexpectedShape` there
-/// are reported as [`Error::Ambiguous`] too. `is_ambiguous()` is only ever true
-/// for `Ambiguous`, and a terminal error never hides a possible duplicate.
+/// | Variant | `status()` | `is_retryable()` | `is_ambiguous()` |
+/// | --- | --- | --- | --- |
+/// | [`Error::Validation`] | none | no | no |
+/// | [`Error::Unauthorized`] | 401 | no | no |
+/// | [`Error::Forbidden`] | 403 | no | no |
+/// | [`Error::NotFound`] | 404 | no | no |
+/// | [`Error::MethodNotAllowed`] | 405 | no | no |
+/// | [`Error::RateLimited`] | 429 | yes | no |
+/// | [`Error::Rejected`] | carried | no | no |
+/// | [`Error::Upstream`] | carried | no | no |
+/// | [`Error::UnexpectedStatus`] | carried | no | no |
+/// | [`Error::Ambiguous`] | none | no | yes |
+/// | [`Error::Transport`] / `Connect` | none | yes | no |
+/// | [`Error::Transport`] / `Timeout` | none | yes | no |
+/// | [`Error::Transport`] / `Io` | none | yes | no |
+/// | [`Error::Transport`] / `Protocol` | none | no | no |
+/// | [`Error::Json`] | none | no | no |
+/// | [`Error::MissingField`] | none | no | no |
+/// | [`Error::UnexpectedShape`] | none | no | no |
+/// | [`Error::TooLarge`] | none | no | no |
+/// | [`Error::Base64`] | none | no | no |
+/// | [`Error::Utf8`] | none | no | no |
+///
+/// A `yes` in `is_retryable()` is narrower than it reads: `RateLimited` is
+/// retryable only once `Retry-After` has elapsed, and the transport kinds are
+/// retryable on an idempotent call. Variant by variant:
+///
+/// * `Validation` — the request was never sent, so the input has to change.
+/// * `Unauthorized`, `Forbidden` — the credential has to change.
+/// * `NotFound`, `MethodNotAllowed` — the resource or the verb is wrong.
+/// * `RateLimited` — the provider dropped the request before processing it, so
+///   a fresh attempt is safe *and* likely to succeed.
+/// * `Rejected` — the provider refused the body; the same body is refused
+///   again.
+/// * `Upstream` — the provider answered with a 5xx, so it is reachable and the
+///   call failed there. For a read it is safe to try again; for a submit the
+///   5xx may arrive after the job was created, which is why the client turns a
+///   5xx on a submit into [`Error::Ambiguous`] instead of `Upstream`. A caller
+///   that deliberately retries a failed read gets `Upstream` and decides for
+///   itself.
+/// * `Ambiguous` — the provider may already have acted on the request. A retry
+///   can produce a second, billed letter, so reconcile first; this is the only
+///   variant for which `is_ambiguous()` is true.
+/// * `Json`, `MissingField`, `UnexpectedShape` — the answer was unusable. On a
+///   submit the client reports [`Error::Ambiguous`] instead, because a 2xx
+///   means the job exists and is billed. `Json` carries no status because it is
+///   raised from the body alone, where a `serde_json` error has no slot for
+///   one: when the client decodes a response, a non-JSON body is `Json` only
+///   for a 2xx, and a non-2xx with an unreadable body is classified by its HTTP
+///   status instead, which yields `Rejected` or `Upstream` and does carry the
+///   code.
+/// * `TooLarge`, `Base64`, `Utf8` — a size or decoding limit hit on a
+///   successful read, so the same bytes fail the same way. `Utf8` is the journal
+///   CSV arriving as something other than UTF-8, the counterpart of `Base64`.
+///
+/// No variant is both retryable and ambiguous: a terminal error never hides a
+/// possible duplicate.
 ///
 /// An informational (1xx) or redirect (3xx) answer is
 /// [`Error::UnexpectedStatus`]. Redirects are never followed, because the
@@ -273,6 +319,13 @@ pub enum Error {
     ///
     /// On a submit (a `POST`) a 2xx with an unreadable body is reported as
     /// [`Error::Ambiguous`] instead, because the job may exist.
+    ///
+    /// Carries no HTTP status: it is raised from the body alone, and a
+    /// `serde_json` error has no slot for one. When the client decodes a
+    /// response, a non-JSON body is `Json` only for a 2xx — a non-2xx with an
+    /// unreadable body (a proxy's HTML page, say) is classified by its HTTP
+    /// status instead and reported as [`Error::Rejected`] or
+    /// [`Error::Upstream`], which do carry the code.
     #[error("invalid JSON in response: {source}")]
     Json {
         /// The underlying `serde_json` error, with line and column.
@@ -423,4 +476,520 @@ fn retry_suffix(retry_after: &Option<Duration>) -> String {
     retry_after.map_or_else(String::new, |duration| {
         format!(", retry after {}s", duration.as_secs())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// Every variant name the documented table has to cover, sorted. Kept
+    /// beside [`name_of`], which cannot compile without naming a new variant.
+    const VARIANTS: &[&str] = &[
+        "Ambiguous",
+        "Base64",
+        "Forbidden",
+        "Json",
+        "MethodNotAllowed",
+        "MissingField",
+        "NotFound",
+        "RateLimited",
+        "Rejected",
+        "TooLarge",
+        "Transport",
+        "Unauthorized",
+        "UnexpectedShape",
+        "UnexpectedStatus",
+        "Upstream",
+        "Utf8",
+        "Validation",
+    ];
+
+    /// One row of the documented table: the label the table writes, its three
+    /// answer cells, and a sample of the variant the row classifies.
+    struct Row {
+        /// First column, exactly as the table spells it.
+        label: &'static str,
+        /// `status()` column: `none`, `carried`, or the fixed code.
+        status: &'static str,
+        /// `is_retryable()` column.
+        retryable: bool,
+        /// `is_ambiguous()` column.
+        ambiguous: bool,
+        /// A constructed value of the variant.
+        error: Error,
+    }
+
+    impl Row {
+        /// The row as it must appear in the documentation, `///` included.
+        fn documented(&self) -> String {
+            format!(
+                "/// | {} | {} | {} | {} |",
+                self.label,
+                self.status,
+                yes_no(self.retryable),
+                yes_no(self.ambiguous)
+            )
+        }
+
+        /// The variant this row classifies, as [`name_of`] spells it.
+        fn variant(&self) -> &'static str {
+            name_of(&self.error)
+        }
+    }
+
+    /// A boolean cell as the table spells it.
+    fn yes_no(value: bool) -> &'static str {
+        if value {
+            "yes"
+        } else {
+            "no"
+        }
+    }
+
+    /// The variant name of `error`, matched with **no** wildcard arm.
+    ///
+    /// `Error` is `#[non_exhaustive]`, which only binds other crates: in here a
+    /// new variant stops this module from compiling until it is named, and
+    /// [`the_documented_table_covers_every_variant`] then insists on a row.
+    fn name_of(error: &Error) -> &'static str {
+        match error {
+            Error::Validation { .. } => "Validation",
+            Error::Unauthorized { .. } => "Unauthorized",
+            Error::Forbidden { .. } => "Forbidden",
+            Error::NotFound { .. } => "NotFound",
+            Error::MethodNotAllowed { .. } => "MethodNotAllowed",
+            Error::RateLimited { .. } => "RateLimited",
+            Error::Rejected { .. } => "Rejected",
+            Error::Upstream { .. } => "Upstream",
+            Error::Ambiguous { .. } => "Ambiguous",
+            Error::Transport { .. } => "Transport",
+            Error::Json { .. } => "Json",
+            Error::MissingField { .. } => "MissingField",
+            Error::UnexpectedShape { .. } => "UnexpectedShape",
+            Error::UnexpectedStatus { .. } => "UnexpectedStatus",
+            Error::TooLarge { .. } => "TooLarge",
+            Error::Base64 { .. } => "Base64",
+            Error::Utf8 { .. } => "Utf8",
+        }
+    }
+
+    /// The `status()` the row promises, for the row's own sample. The grammar
+    /// of the cell is checked by [`the_status_column_uses_the_documented_grammar`].
+    fn documented_status(row: &Row) -> Option<u16> {
+        match row.status {
+            "none" => None,
+            "carried" => match &row.error {
+                Error::Rejected { status, .. }
+                | Error::Upstream { status, .. }
+                | Error::UnexpectedStatus { status, .. } => Some(*status),
+                _ => None,
+            },
+            fixed => fixed.parse::<u16>().ok(),
+        }
+    }
+
+    /// One documented row: label, the three answer cells, and a sample.
+    fn row(
+        label: &'static str,
+        status: &'static str,
+        retryable: bool,
+        ambiguous: bool,
+        error: Error,
+    ) -> Row {
+        Row {
+            label,
+            status,
+            retryable,
+            ambiguous,
+            error,
+        }
+    }
+
+    /// The rows of the table in [`Error`]'s documentation, one per line.
+    #[allow(clippy::too_many_lines)] // one row per line of the table, on purpose
+    fn table() -> Vec<Row> {
+        vec![
+            row(
+                "[`Error::Validation`]",
+                "none",
+                false,
+                false,
+                Error::invalid("letter.notice", "must not be empty"),
+            ),
+            row(
+                "[`Error::Unauthorized`]",
+                "401",
+                false,
+                false,
+                Error::Unauthorized {
+                    message: "Unauthorized.".into(),
+                },
+            ),
+            row(
+                "[`Error::Forbidden`]",
+                "403",
+                false,
+                false,
+                Error::Forbidden {
+                    message: "Forbidden".into(),
+                },
+            ),
+            row(
+                "[`Error::NotFound`]",
+                "404",
+                false,
+                false,
+                Error::NotFound {
+                    message: "Not Found".into(),
+                },
+            ),
+            row(
+                "[`Error::MethodNotAllowed`]",
+                "405",
+                false,
+                false,
+                Error::MethodNotAllowed {
+                    message: "Method Not Allowed".into(),
+                },
+            ),
+            row(
+                "[`Error::RateLimited`]",
+                "429",
+                true,
+                false,
+                Error::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+            ),
+            row(
+                "[`Error::Rejected`]",
+                "carried",
+                false,
+                false,
+                Error::Rejected {
+                    status: 400,
+                    message: "Bad Request".into(),
+                },
+            ),
+            row(
+                "[`Error::Upstream`]",
+                "carried",
+                false,
+                false,
+                Error::Upstream {
+                    status: 502,
+                    message: "Bad Gateway".into(),
+                },
+            ),
+            row(
+                "[`Error::UnexpectedStatus`]",
+                "carried",
+                false,
+                false,
+                Error::UnexpectedStatus {
+                    status: 302,
+                    endpoint: "GET /v3/balance",
+                    message: "Found".into(),
+                },
+            ),
+            row(
+                "[`Error::Ambiguous`]",
+                "none",
+                false,
+                true,
+                Error::Ambiguous {
+                    message: "timeout after 30s".into(),
+                },
+            ),
+            row(
+                "[`Error::Transport`] / `Connect`",
+                "none",
+                true,
+                false,
+                Error::Transport {
+                    kind: TransportKind::Connect,
+                    message: "dns".into(),
+                },
+            ),
+            row(
+                "[`Error::Transport`] / `Timeout`",
+                "none",
+                true,
+                false,
+                Error::Transport {
+                    kind: TransportKind::Timeout,
+                    message: "no answer".into(),
+                },
+            ),
+            row(
+                "[`Error::Transport`] / `Io`",
+                "none",
+                true,
+                false,
+                Error::Transport {
+                    kind: TransportKind::Io,
+                    message: "connection reset".into(),
+                },
+            ),
+            row(
+                "[`Error::Transport`] / `Protocol`",
+                "none",
+                false,
+                false,
+                Error::Transport {
+                    kind: TransportKind::Protocol,
+                    message: "no scripted response".into(),
+                },
+            ),
+            row(
+                "[`Error::Json`]",
+                "none",
+                false,
+                false,
+                Error::Json {
+                    source: serde_json::Error::io(std::io::Error::from(
+                        std::io::ErrorKind::UnexpectedEof,
+                    )),
+                },
+            ),
+            row(
+                "[`Error::MissingField`]",
+                "none",
+                false,
+                false,
+                Error::MissingField {
+                    endpoint: "GET /v3/balance",
+                    field: "data",
+                },
+            ),
+            row(
+                "[`Error::UnexpectedShape`]",
+                "none",
+                false,
+                false,
+                Error::UnexpectedShape {
+                    endpoint: "GET /v3/balance",
+                    message: "expected an object, got an array".into(),
+                },
+            ),
+            row(
+                "[`Error::TooLarge`]",
+                "none",
+                false,
+                false,
+                Error::TooLarge {
+                    field: "letter.base64_file",
+                    len: 11,
+                    max: 10,
+                },
+            ),
+            row(
+                "[`Error::Base64`]",
+                "none",
+                false,
+                false,
+                Error::Base64 {
+                    field: "invoice.base64_data",
+                    message: "invalid symbol 33".into(),
+                },
+            ),
+            row(
+                "[`Error::Utf8`]",
+                "none",
+                false,
+                false,
+                Error::Utf8 {
+                    field: "journal.csv_base64",
+                },
+            ),
+        ]
+    }
+
+    /// Each row is the answer the code gives, and the two invariants that make
+    /// the table worth having hold: nothing is both retryable and ambiguous,
+    /// and every variant renders a message.
+    #[test]
+    fn every_row_matches_the_code() {
+        for row in table() {
+            let name = row.variant();
+            assert_eq!(
+                row.error.status(),
+                documented_status(&row),
+                "{name}: `status()` disagrees with the documented table ({})",
+                row.status
+            );
+            assert_eq!(
+                row.error.is_retryable(),
+                row.retryable,
+                "{name}: `is_retryable()` disagrees with the documented table"
+            );
+            assert_eq!(
+                row.error.is_ambiguous(),
+                row.ambiguous,
+                "{name}: `is_ambiguous()` disagrees with the documented table"
+            );
+            assert!(
+                !(row.retryable && row.ambiguous),
+                "{name}: a request that may already have been processed is never retryable"
+            );
+            assert!(!row.error.to_string().is_empty(), "{name}: empty Display");
+        }
+    }
+
+    /// The `status()` column has a grammar a reader can rely on, and `carried`
+    /// is only used where there is a status field to carry.
+    #[test]
+    fn the_status_column_uses_the_documented_grammar() {
+        for row in table() {
+            let cell = row.status;
+            assert!(
+                cell == "none" || cell == "carried" || cell.parse::<u16>().is_ok(),
+                "`{}`: `{cell}` is neither `none`, `carried` nor a status code",
+                row.label
+            );
+            if cell == "carried" {
+                assert!(
+                    matches!(
+                        &row.error,
+                        Error::Rejected { .. }
+                            | Error::Upstream { .. }
+                            | Error::UnexpectedStatus { .. }
+                    ),
+                    "`{}`: only `Rejected`, `Upstream` and `UnexpectedStatus` carry a status",
+                    row.label
+                );
+            }
+        }
+    }
+
+    /// No variant falls through to the default arms in `is_retryable`,
+    /// `is_ambiguous` or `status`. `name_of` has no wildcard arm, so a new
+    /// variant breaks the build; a variant that is named but not tabulated
+    /// breaks this test.
+    #[test]
+    fn the_documented_table_covers_every_variant() {
+        let rows = table();
+        let covered: BTreeSet<&str> = rows.iter().map(Row::variant).collect();
+        let expected: BTreeSet<&str> = VARIANTS.iter().copied().collect();
+        assert_eq!(
+            covered, expected,
+            "a row per variant, and no row without one"
+        );
+
+        let labels: BTreeSet<&str> = rows.iter().map(|row| row.label).collect();
+        assert_eq!(labels.len(), rows.len(), "two rows share a label");
+        assert_eq!(
+            rows.len(),
+            VARIANTS.len() + 3,
+            "the four `Transport` kinds are the only repeated variant"
+        );
+    }
+
+    /// Every [`TransportKind`], listed so that a new kind cannot stay out of
+    /// the documented table: [`kind_name`] matches without a wildcard arm, so
+    /// the build breaks first.
+    const TRANSPORT_KINDS: &[TransportKind] = &[
+        TransportKind::Connect,
+        TransportKind::Timeout,
+        TransportKind::Io,
+        TransportKind::Protocol,
+    ];
+
+    /// The `TransportKind` name the table's second column spells, matched with
+    /// **no** wildcard arm.
+    fn kind_name(kind: TransportKind) -> &'static str {
+        match kind {
+            TransportKind::Connect => "Connect",
+            TransportKind::Timeout => "Timeout",
+            TransportKind::Io => "Io",
+            TransportKind::Protocol => "Protocol",
+        }
+    }
+
+    /// The four `Transport` rows are one per kind, labelled exactly as the
+    /// table spells them, and each one answers like the kind it classifies.
+    /// `TransportKind` is `#[non_exhaustive]` as well, so this is the check
+    /// that would catch a kind added without a row.
+    #[test]
+    fn every_transport_kind_has_exactly_one_documented_row() {
+        let rows = table();
+        let transport: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(&row.error, Error::Transport { .. }))
+            .collect();
+        assert_eq!(
+            transport.len(),
+            TRANSPORT_KINDS.len(),
+            "one `Transport` row per kind, and no kind twice"
+        );
+
+        for kind in TRANSPORT_KINDS {
+            let label = format!("[`Error::Transport`] / `{}`", kind_name(*kind));
+            let matching: Vec<&Row> = transport
+                .iter()
+                .copied()
+                .filter(|row| row.label == label)
+                .collect();
+            assert_eq!(matching.len(), 1, "no single row spells `{label}`");
+            let row = &matching[0];
+
+            let sample = Error::Transport {
+                kind: *kind,
+                message: "sample".into(),
+            };
+            assert_eq!(sample.status(), documented_status(row), "`{label}`: status");
+            assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
+            assert_eq!(row.ambiguous, sample.is_ambiguous(), "`{label}`: ambiguous");
+            assert_eq!(
+                sample.to_string(),
+                format!("transport error ({kind}): sample"),
+                "`{label}`: `Display` names the kind the table names"
+            );
+            assert_eq!(
+                kind.to_string(),
+                kind_name(*kind).to_ascii_lowercase(),
+                "`{label}`: `Display` spells the kind the way the row does"
+            );
+        }
+    }
+
+    /// The table is prose, so it too is asserted: every row above appears in
+    /// the documentation exactly once, and the documentation has no row the
+    /// table does not know. Editing one side alone fails here.
+    #[test]
+    fn the_documentation_table_lists_every_row() {
+        const SOURCE: &str = include_str!("error.rs");
+        let rows = table();
+        for row in &rows {
+            let documented = row.documented();
+            assert_eq!(
+                SOURCE.matches(documented.as_str()).count(),
+                1,
+                "the documentation must carry exactly one `{documented}` line"
+            );
+        }
+        let documented_rows = SOURCE
+            .lines()
+            .filter(|line| line.starts_with("/// | [`Error::"))
+            .count();
+        assert_eq!(
+            documented_rows,
+            rows.len(),
+            "the documentation and `table()` disagree on the number of rows"
+        );
+    }
+
+    /// `retry_suffix` is only ever empty when there is nothing to say, and a
+    /// zero-second `Retry-After` is still something to say.
+    #[test]
+    fn retry_suffix_covers_both_sides_of_the_presence_boundary() {
+        assert_eq!(retry_suffix(&None), "");
+        assert_eq!(retry_suffix(&Some(Duration::ZERO)), ", retry after 0s");
+        assert_eq!(
+            retry_suffix(&Some(Duration::from_secs(1))),
+            ", retry after 1s"
+        );
+    }
 }

@@ -10,10 +10,88 @@ mod common;
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    Color, Date, EmailOption, JobStatus, Letter, Mode, Money, PrintMode, Registered, Shipping,
-    MAX_NOTICE_CHARS,
+    Color, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode, Registered,
+    Shipping, TransportKind, MAX_NOTICE_CHARS,
 };
 use proptest::prelude::*;
+
+/// One `Error` per public variant, with `text` in every prose slot and
+/// `status`/`kind` in the slots that decide the stance. Kept exhaustive by
+/// hand: a variant added to the enum has to be added here too, which is what
+/// makes [`stance`] a statement about the whole enum.
+fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
+    use std::time::Duration;
+
+    vec![
+        Error::Validation {
+            field: "letter.notice",
+            message: text.into(),
+        },
+        Error::Unauthorized {
+            message: text.into(),
+        },
+        Error::Forbidden {
+            message: text.into(),
+        },
+        Error::NotFound {
+            message: text.into(),
+        },
+        Error::MethodNotAllowed {
+            message: text.into(),
+        },
+        Error::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        Error::Rejected {
+            status,
+            message: text.into(),
+        },
+        Error::Upstream {
+            status,
+            message: text.into(),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint: "GET /v3/balance",
+            message: text.into(),
+        },
+        Error::Ambiguous {
+            message: text.into(),
+        },
+        Error::Transport {
+            kind,
+            message: text.into(),
+        },
+        Error::Json {
+            source: serde_json::Error::io(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+        },
+        Error::MissingField {
+            endpoint: "GET /v3/balance",
+            field: "data",
+        },
+        Error::UnexpectedShape {
+            endpoint: "GET /v3/balance",
+            message: text.into(),
+        },
+        Error::TooLarge {
+            field: "letter.base64_file",
+            len: 11,
+            max: 10,
+        },
+        Error::Base64 {
+            field: "invoice.base64_data",
+            message: text.into(),
+        },
+        Error::Utf8 {
+            field: "journal.csv_base64",
+        },
+    ]
+}
+
+/// The three answers the documented table gives per variant.
+fn stance(error: &Error) -> (bool, bool, Option<u16>) {
+    (error.is_retryable(), error.is_ambiguous(), error.status())
+}
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
@@ -354,6 +432,148 @@ proptest! {
             text
         );
     }
+
+    /// `Retry-After` round-trips through `Display`: what the wording shows is
+    /// what the caller can read back, and the seconds are `Duration::as_secs` —
+    /// a sub-second remainder is truncated, never rounded up into a retry that
+    /// would hit the limit again.
+    #[test]
+    fn the_retry_after_wording_round_trips(
+        secs in any::<u64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let rendered = letterxpress::Error::RateLimited {
+            retry_after: Some(std::time::Duration::new(secs, nanos)),
+        }
+        .to_string();
+        prop_assert_eq!(
+            &rendered,
+            &format!("letterxpress rate limit reached, retry after {secs}s")
+        );
+
+        let parsed = rendered
+            .strip_prefix("letterxpress rate limit reached, retry after ")
+            .and_then(|tail| tail.strip_suffix('s'))
+            .and_then(|digits| digits.parse::<u64>().ok());
+        prop_assert_eq!(parsed, Some(secs));
+    }
+
+    /// The stance belongs to the variant — plus the status or transport kind it
+    /// carries — never to the prose. Two errors of the same variant, built from
+    /// arbitrary and different text, answer identically; rendering either never
+    /// panics; and no variant is ever both retryable and ambiguous, because a
+    /// retry of a possibly-processed submit would bill a second letter.
+    #[test]
+    fn the_stance_belongs_to_the_variant_not_the_payload(
+        first in ".*",
+        second in ".*",
+        status in any::<u16>(),
+        kind in prop_oneof![
+            Just(TransportKind::Connect),
+            Just(TransportKind::Timeout),
+            Just(TransportKind::Io),
+            Just(TransportKind::Protocol),
+        ],
+    ) {
+        let left = every_variant(&first, status, kind);
+        let right = every_variant(&second, status, kind);
+        prop_assert_eq!(left.len(), right.len());
+
+        for (left, right) in left.iter().zip(right.iter()) {
+            prop_assert_eq!(stance(left), stance(right), "{} / {}", left, right);
+            prop_assert!(!left.to_string().is_empty());
+            prop_assert!(!right.to_string().is_empty());
+            prop_assert!(
+                !(left.is_retryable() && left.is_ambiguous()),
+                "{}: a possible duplicate is never retryable",
+                left
+            );
+        }
+    }
+}
+
+#[test]
+fn the_retry_after_wording_truncates_at_the_second_boundary() {
+    use std::time::Duration;
+
+    let render = |retry_after: Option<Duration>| {
+        letterxpress::Error::RateLimited { retry_after }.to_string()
+    };
+
+    // Just inside the limit: 999 999 999 ns still reports whole seconds, so it
+    // is "0s" and not "1s".
+    assert_eq!(
+        render(Some(Duration::new(0, 999_999_999))),
+        "letterxpress rate limit reached, retry after 0s"
+    );
+    // Exactly at it.
+    assert_eq!(
+        render(Some(Duration::new(1, 0))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // And just past it: the remainder is truncated, not rounded.
+    assert_eq!(
+        render(Some(Duration::new(1, 1))),
+        "letterxpress rate limit reached, retry after 1s"
+    );
+    // The largest representable duration renders without wrapping.
+    assert_eq!(
+        render(Some(Duration::new(u64::MAX, 999_999_999))),
+        format!("letterxpress rate limit reached, retry after {}s", u64::MAX)
+    );
+    // No `Retry-After` at all: no suffix, and in particular not "0s".
+    assert_eq!(render(None), "letterxpress rate limit reached");
+}
+
+#[test]
+fn a_carried_status_is_reported_verbatim_at_both_ends_of_the_range() {
+    // The boundary pair for the `status` column: the smallest and largest code
+    // a `u16` can hold, plus the documented 4xx/5xx edges in between, come back
+    // unchanged rather than being clamped or mapped.
+    for status in [0, 1, 399, 400, 499, 500, 599, 600, u16::MAX] {
+        for error in [
+            Error::Rejected {
+                status,
+                message: "rejected".into(),
+            },
+            Error::Upstream {
+                status,
+                message: "upstream".into(),
+            },
+            Error::UnexpectedStatus {
+                status,
+                endpoint: "GET /v3/balance",
+                message: "redirect".into(),
+            },
+        ] {
+            assert_eq!(error.status(), Some(status), "{status}: {error}");
+            assert!(!error.is_retryable(), "{status}: {error}");
+            assert!(!error.is_ambiguous(), "{status}: {error}");
+        }
+    }
+}
+
+#[test]
+fn unreadable_json_and_the_wrong_shape_share_one_stance() {
+    // `Error::Json` is reached through `#[from] serde_json::Error` as well as by
+    // construction; both entries answer like the table's `Json` row, which is
+    // the same stance as `UnexpectedShape`: the same bytes fail the same way,
+    // so neither invites a retry.
+    let constructed = Error::Json {
+        source: serde_json::Error::io(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+    };
+    let converted = Error::from(serde_json::Error::io(std::io::Error::from(
+        std::io::ErrorKind::InvalidData,
+    )));
+    let shape = Error::UnexpectedShape {
+        endpoint: "GET /v3/balance",
+        message: "expected an object, got an array".into(),
+    };
+
+    assert_eq!(stance(&constructed), stance(&converted));
+    assert_eq!(stance(&converted), stance(&shape));
+    assert_eq!(stance(&converted), (false, false, None));
+    assert!(std::error::Error::source(&converted).is_some());
 }
 
 #[test]
