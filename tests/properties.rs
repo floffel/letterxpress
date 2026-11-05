@@ -12,8 +12,8 @@ use std::time::Duration;
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    Color, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode, Registered,
-    Shipping, TransportKind, MAX_NOTICE_CHARS,
+    Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode,
+    Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
 };
 use proptest::prelude::*;
 
@@ -106,6 +106,29 @@ fn stance(error: &Error) -> (bool, bool, bool, bool, Option<u16>) {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Credentials accept exactly non-empty, bounded, log-safe ASCII: graphic
+    /// characters and internal spaces, never bidi controls, separators, or
+    /// zero-width characters.
+    #[test]
+    fn credential_validation_accepts_only_ascii_graphic_and_space(
+        username in proptest::collection::vec(any::<char>(), 0..300),
+        apikey in proptest::collection::vec(any::<char>(), 0..550),
+    ) {
+        let username: String = username.into_iter().collect();
+        let apikey: String = apikey.into_iter().collect();
+        let expected_username = is_valid_credential_token(&username, 256);
+        let expected_apikey = is_valid_credential_token(&apikey, 512);
+
+        prop_assert_eq!(
+            Credentials::new(&username, "key", Mode::Test).is_ok(),
+            expected_username
+        );
+        prop_assert_eq!(
+            Credentials::new("user", &apikey, Mode::Test).is_ok(),
+            expected_apikey
+        );
+    }
 
     /// The checksum is always 32 lowercase hex characters and is the MD5 of the
     /// base64 text (not of the PDF bytes).
@@ -517,6 +540,15 @@ proptest! {
             }
         }
     }
+}
+
+fn is_valid_credential_token(value: &str, max: usize) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .chars()
+            .all(|character| character.is_ascii_graphic() || character == ' ')
 }
 
 #[test]

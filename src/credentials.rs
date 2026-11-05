@@ -166,12 +166,13 @@ pub(crate) struct AuthPayload<'a> {
 }
 
 impl Credentials {
-    /// Builds credentials, rejecting empty or control-character values.
+    /// Builds credentials, rejecting empty or non-ASCII-printable values.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] when `username` or `apikey` is empty after
-    /// trimming, contains a control character, or exceeds the sanity bound.
+    /// trimming, contains anything other than ASCII graphic characters or
+    /// spaces, or exceeds the sanity bound.
     ///
     /// ```
     /// use letterxpress::{Credentials, Mode};
@@ -179,6 +180,8 @@ impl Credentials {
     /// let credentials = Credentials::new("kunde", "abc123", Mode::Live)?;
     /// assert_eq!(credentials.username(), "kunde");
     /// assert!(credentials.mode().is_billable());
+    /// assert!(Credentials::new("kunde\u{2028}name", "abc123", Mode::Live).is_err());
+    /// assert!(Credentials::new("kunde", "abc\u{202E}123", Mode::Live).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn new(
@@ -202,7 +205,9 @@ impl Credentials {
         })
     }
 
-    /// The account name. Safe to log: it identifies the account, not the key.
+    /// The account name, restricted to ASCII graphic characters and spaces so
+    /// it is safe to log: it identifies the account, not the key, and cannot
+    /// inject line breaks, bidi controls, or zero-width characters.
     ///
     /// ```
     /// use letterxpress::{Credentials, Mode};
@@ -259,19 +264,25 @@ fn trim_in_place(value: &mut String) {
     value.truncate(trimmed_len);
 }
 
-/// Rejects empty, oversized, and control-character-bearing values.
+/// Rejects empty, oversized, and non-ASCII-printable values.
 fn validate_token(field: &'static str, value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::invalid(field, "must not be empty"));
     }
-    if value.chars().count() > max {
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_graphic() || character == ' ')
+    {
+        return Err(Error::invalid(
+            field,
+            "must contain only ASCII graphic characters or spaces",
+        ));
+    }
+    if value.len() > max {
         return Err(Error::invalid(
             field,
             format!("must be at most {max} characters"),
         ));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(Error::invalid(field, "must not contain control characters"));
     }
     Ok(())
 }
@@ -292,14 +303,55 @@ mod tests {
 
     #[test]
     fn token_validation_rejects_every_bad_shape() {
-        assert!(validate_token("field", "", 10).is_err());
-        assert!(validate_token("field", "abcdef", 3).is_err());
-        assert!(validate_token("field", "a\u{1}b", 10).is_err());
+        assert!(matches!(
+            validate_token("field", "", 10),
+            Err(Error::Validation { field: "field", .. })
+        ));
+        assert!(matches!(
+            validate_token("field", "abcdef", 3),
+            Err(Error::Validation { field: "field", .. })
+        ));
         assert!(validate_token("field", "abc", 3).is_ok());
-        assert!(
-            validate_token("field", "äöü", 3).is_ok(),
-            "three characters, six bytes"
-        );
+        assert!(validate_token("field", "abc def", 7).is_ok());
+        assert!(validate_token("field", "!\"#$%&'()*+,-./", 16).is_ok());
+    }
+
+    #[test]
+    fn token_validation_rejects_invisible_and_directional_characters() {
+        for value in [
+            "a\u{1}b",    // Cc: START OF HEADING
+            "a\tb",       // Cc: TAB
+            "a\u{200B}b", // Cf: ZERO WIDTH SPACE
+            "a\u{2028}b", // Zl: LINE SEPARATOR
+            "a\u{202E}b", // Cf: RIGHT-TO-LEFT OVERRIDE
+            "äöü",        // printable non-ASCII
+            "a\u{7F}b",   // Cc: DELETE
+        ] {
+            assert!(matches!(
+                validate_token("field", value, 10),
+                Err(Error::Validation { field: "field", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn credentials_reject_log_unsafe_username_and_api_key_characters() {
+        for value in ["us\u{2028}er", "us\u{202E}er", "us\u{200B}er"] {
+            assert!(matches!(
+                Credentials::new(value, "key", Mode::Test),
+                Err(Error::Validation {
+                    field: "credentials.username",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                Credentials::new("user", value, Mode::Test),
+                Err(Error::Validation {
+                    field: "credentials.apikey",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
