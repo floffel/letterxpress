@@ -61,6 +61,28 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // The `Retry-After` header is provider-controlled too: any bytes as its
+    // value must classify, bound and render without panicking. Decoding clamps
+    // it, so no answer can carry a wait above the ceiling.
+    if let Ok(text) = std::str::from_utf8(data) {
+        for status in [200u16, 400, 429, 503] {
+            let response = Response::new(
+                status,
+                [("Retry-After".to_string(), text.to_owned())],
+                Vec::new(),
+            );
+            match letterxpress::parse_envelope("fuzz", response) {
+                Ok(envelope) => {
+                    let _ = envelope.status();
+                }
+                Err(error) => {
+                    let _ = error.retry_after();
+                    let _ = error.to_string();
+                }
+            }
+        }
+    }
+
     // Text-shaped parsers get the same bytes.
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = JobStatus::from_wire(text);

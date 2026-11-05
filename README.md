@@ -132,13 +132,14 @@ the request exactly once and never retries it.
 
 | Failure | What it means | What to do |
 | --- | --- | --- |
-| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | retry after `Retry-After` |
+| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | wait `error.retry_after()` (never more than 5 min) and retry; `None` means no usable header — back off exponentially |
 | `Error::Transport { kind: Connect, .. }` | nothing was written | safe to retry |
 | `Error::Transport { kind: Timeout \| Io, .. }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::UnexpectedStatus` on a **submit** (1xx/3xx) | promoted to `Error::Ambiguous` — the request may have been processed; redirects are not followed | reconcile, then resubmit |
 | `Error::Json` / `MissingField` / `UnexpectedShape` on a **submit** (2xx with an undecodable body) | promoted to `Error::Ambiguous` — the job exists, its tracking data does not decode | reconcile (list `print_jobs`), then resubmit only if absent |
-| `Error::Ambiguous` | the letter may already exist | list `print_jobs` and look for your `notice` |
+| `Error::Ambiguous { kind: Timeout \| Io }` | no usable answer arrived | reconcile; `kind.status()` is `None`, because there is no code to log |
+| `Error::Ambiguous { kind: Upstream { status } }` | the provider answered, the outcome is open (5xx, 1xx/3xx, or a 2xx with an unreadable body) | log or alert on `status()`, then reconcile |
 | `Error::Rejected` (4xx other than 429) | the body was refused | fix the input |
 
 `is_retryable_for(idempotent)` answers the retry question for the request that
@@ -148,7 +149,16 @@ conservative alias for `is_retryable_for(false)`, so a submit is only ever
 retried when nothing can have been billed; `retry_after()` adds the provider's
 own backoff hint when it sent one. `is_ambiguous()` is true only for
 `Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as idempotent and
-never promoted to `Ambiguous`.
+never promoted to `Ambiguous`. `Error::Ambiguous` carries an `AmbiguousKind`
+and `Error::status()` returns the numeric HTTP status for an `Upstream` kind,
+so reconciliation and alerting branch on data, never on the message text.
+
+`Retry-After` is clamped to `MAX_RETRY_AFTER` (5 minutes) where the header is
+decoded and again by `Error::retry_after()`, so a `429` carrying `86400` — a
+proxy's throttle, a misconfigured edge, a hostile answer — parks a caller for
+five minutes, not for a day. `None` means the header was absent or unreadable
+(an HTTP-date, a negative number, a list): back off on your own rather than
+retrying immediately, because the exhausted window refills per minute.
 
 ## Feature matrix
 
@@ -176,8 +186,9 @@ stack, no async runtime, no socket. Bring your own `Transport` implementation
   another host.
 - Payload sizes are checked before allocation; decoded base64 is bounded by the
   documented 50 MB; a decoded job is bounded to 50 000 items of at most 10 000
-  pages each, so `PrintJob::pages()` cannot overflow; error bodies are truncated
-  to 512 characters before they reach a log line.
+  pages each, so `PrintJob::pages()` cannot overflow; a provider `Retry-After`
+  is bounded to `MAX_RETRY_AFTER`; error bodies are truncated to 512 characters
+  before they reach a log line.
 - There is no shared secret to compare in this protocol (the key is a bearer
   credential in the body, not a signature the client verifies), so there is no
   constant-time comparison to make. Nothing in the crate logs a body.

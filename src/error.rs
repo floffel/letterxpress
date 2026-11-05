@@ -21,9 +21,11 @@
 //!   recovery is to look the job up (by `notice` or the job list) before
 //!   resubmitting.
 //!
-//! A retry that is allowed is not always a retry that is due: [`Error::retry_after`]
-//! carries the provider's own backoff hint when it sent one, and the crate
-//! invents no delay of its own.
+//! A `429` also carries a waiting time. [`Error::retry_after`] reports the
+//! provider's `Retry-After` bounded by [`MAX_RETRY_AFTER`], so a header cannot
+//! park a caller for hours, and `None` there means "no usable hint, back off on
+//! your own" — never "retry immediately". A retry that is allowed is not always
+//! a retry that is due: the crate invents no delay of its own.
 
 use std::time::Duration;
 
@@ -136,6 +138,125 @@ impl std::fmt::Display for TransportKind {
     }
 }
 
+/// Why a non-idempotent request left an unknown outcome.
+///
+/// Everything a reconciliation needs is here, so it never has to search the
+/// message: whether anything was written at all, and — when the provider did
+/// answer — which HTTP status it answered with.
+///
+/// ```
+/// use letterxpress::AmbiguousKind;
+///
+/// assert_eq!(AmbiguousKind::Timeout.status(), None);
+/// assert_eq!(AmbiguousKind::Io.status(), None);
+///
+/// let upstream = AmbiguousKind::Upstream { status: 503 };
+/// assert_eq!(upstream.status(), Some(503));
+/// assert_eq!(upstream.to_string(), "upstream 503");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AmbiguousKind {
+    /// The request was written, but no answer arrived in time.
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Timeout.status(), None);
+    /// ```
+    Timeout,
+    /// The connection broke mid-flight (reset, truncated body, TLS alert).
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Io.status(), None);
+    /// ```
+    Io,
+    /// The provider answered with an HTTP status that does not settle the
+    /// outcome: a 5xx (it may have created the job before failing), a 1xx/3xx
+    /// that was not followed, or a 2xx whose body did not decode (the job
+    /// exists, its tracking data does not).
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Upstream { status: 500 }.status(), Some(500));
+    /// ```
+    Upstream {
+        /// The HTTP status the provider answered with, or the body-level
+        /// status when the HTTP status itself was 2xx.
+        status: u16,
+    },
+}
+
+impl AmbiguousKind {
+    /// The HTTP status this kind carries, when the provider answered at all.
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Timeout.status(), None);
+    /// assert_eq!(AmbiguousKind::Io.status(), None);
+    /// assert_eq!(AmbiguousKind::Upstream { status: 502 }.status(), Some(502));
+    /// ```
+    #[must_use]
+    pub fn status(self) -> Option<u16> {
+        match self {
+            Self::Timeout | Self::Io => None,
+            Self::Upstream { status } => Some(status),
+        }
+    }
+}
+
+impl std::fmt::Display for AmbiguousKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("timeout"),
+            Self::Io => f.write_str("io"),
+            Self::Upstream { status } => write!(f, "upstream {status}"),
+        }
+    }
+}
+
+/// The longest wait this crate will report for a provider `Retry-After`.
+///
+/// The documented limit is 120 requests per minute
+/// ([`RATE_LIMIT_PER_MINUTE`](crate::RATE_LIMIT_PER_MINUTE)), so a rate-limit
+/// answer asks for seconds, not for hours: a header saying `86400` describes
+/// something other than this contract — a proxy's own throttle, a misconfigured
+/// edge, or a hostile response — and honouring it verbatim parks the caller for
+/// a day. Five minutes is far above anything the contract can demand and far
+/// below anything that hurts.
+///
+/// The cap is applied where the header enters the crate and again by
+/// [`Error::retry_after`], so no path hands out an unbounded wait. Waiting the
+/// capped time is safe even when it was not enough: the next answer is another
+/// `429` with its own hint.
+///
+/// Decoding clamps, so an error this crate produced already carries at most
+/// this wait; [`Error::retry_after`] applies the cap a second time, so a value
+/// assembled by hand cannot exceed it either.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use letterxpress::{Error, MAX_RETRY_AFTER};
+///
+/// assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(300));
+///
+/// // A header an order of magnitude above the ceiling is reported at it.
+/// let err = Error::RateLimited { retry_after: Some(Duration::from_secs(86_400)) };
+/// assert_eq!(err.retry_after(), Some(MAX_RETRY_AFTER));
+/// ```
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+
+/// The wait to actually honour: the provider's value, never above
+/// [`MAX_RETRY_AFTER`].
+pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
+    wait.min(MAX_RETRY_AFTER)
+}
+
 /// The error type returned by every fallible operation in this crate.
 ///
 /// The enum is `#[non_exhaustive]`: new failure modes can appear without a
@@ -143,8 +264,9 @@ impl std::fmt::Display for TransportKind {
 ///
 /// # Retry stance per variant
 ///
-/// One row per variant; [`Error::Transport`] is split by [`TransportKind`]
-/// because the kind is what decides. This table *is* the contract:
+/// One row per variant; [`Error::Transport`] is split by [`TransportKind`] and
+/// [`Error::Ambiguous`] by [`AmbiguousKind`], because in both cases the kind is
+/// what decides. This table *is* the contract:
 /// [`Error::status`], [`Error::is_retryable`], [`Error::is_retryable_for`],
 /// [`Error::is_ambiguous`] and [`Error::retry_after`] answer for every variant
 /// exactly as listed, and the test module at the end of this file asserts the
@@ -170,7 +292,9 @@ impl std::fmt::Display for TransportKind {
 /// | [`Error::Rejected`] | carried | no | no | no | no |
 /// | [`Error::Upstream`] | carried | no | yes | no | no |
 /// | [`Error::UnexpectedStatus`] | carried | no | no | no | no |
-/// | [`Error::Ambiguous`] | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Timeout` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Io` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Upstream` | carried | no | no | yes | no |
 /// | [`Error::Transport`] / `Connect` | none | yes | yes | no | no |
 /// | [`Error::Transport`] / `Timeout` | none | no | yes | no | no |
 /// | [`Error::Transport`] / `Io` | none | no | yes | no | no |
@@ -205,7 +329,10 @@ impl std::fmt::Display for TransportKind {
 /// * `Ambiguous` — the provider may already have acted on the request. A retry
 ///   can produce a second, billed letter, so reconcile first; this is the only
 ///   variant for which `is_ambiguous()` is true, and no context makes it
-///   retryable.
+///   retryable. Its [`kind`](Error::Ambiguous::kind) says what was observed:
+///   `Timeout` and `Io` mean no usable answer arrived, `Upstream { status }`
+///   means the provider answered and that code is what [`Error::status`]
+///   returns.
 /// * `Transport` — a connection that was never established (`Connect`) cannot
 ///   have submitted a letter, so it is retryable in both contexts. `Timeout`
 ///   and `Io` may have delivered the request: retryable for a read only. The
@@ -238,9 +365,9 @@ impl std::fmt::Display for TransportKind {
 /// let err = Error::RateLimited { retry_after: Some(std::time::Duration::from_secs(30)) };
 /// assert!(err.is_retryable());
 /// assert!(err.is_retryable_for(Method::Post.is_idempotent()));
-/// assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 /// assert!(!err.is_ambiguous());
 /// assert_eq!(err.status(), Some(429));
+/// assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 /// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -292,11 +419,21 @@ pub enum Error {
     /// 2xx.
     ///
     /// Retrying is safe: the provider rejected the request before processing
-    /// it. `retry_after` is the `Retry-After` response header when the provider
-    /// sent a parseable one, whichever path carried the 429.
+    /// it. `retry_after` holds the `Retry-After` header when the provider sent
+    /// a parseable one, whichever path carried the 429, clamped to
+    /// [`MAX_RETRY_AFTER`]; read the wait through [`Error::retry_after`], which
+    /// applies the same ceiling to a value built by hand.
+    ///
+    /// `None` means the provider named no usable wait — back off exponentially.
+    /// It does **not** mean "retry now": an immediate retry spends the budget
+    /// that was just exhausted, and the 120-per-minute window is refilled per
+    /// minute, not per request.
     #[error("letterxpress rate limit reached{}", retry_suffix(.retry_after))]
     RateLimited {
-        /// `Retry-After` as a duration, when present and parseable.
+        /// `Retry-After` in seconds, when the header was present and
+        /// parseable, clamped by [`MAX_RETRY_AFTER`] for every value the client
+        /// decoded. Read it through [`Error::retry_after`], which bounds a
+        /// hand-built value too.
         retry_after: Option<Duration>,
     },
 
@@ -362,16 +499,35 @@ pub enum Error {
     /// `notice` you set on the letter, or via the returned tracking data — and
     /// only submit again if it is absent.
     ///
-    /// ```
-    /// use letterxpress::Error;
+    /// [`kind`](Error::Ambiguous::kind) says what was observed, so the
+    /// reconciliation, the log line and an alerting rule can be driven by data
+    /// rather than by the prose in `message`: a timeout means no answer
+    /// arrived, `Upstream { status }` means one did and [`Error::status`]
+    /// reports that code.
     ///
-    /// let error = Error::Ambiguous { message: "timeout after 30s".into() };
-    /// assert!(error.is_ambiguous());
-    /// assert!(!error.is_retryable());
     /// ```
-    #[error("request may have been processed: {message}")]
+    /// use letterxpress::{AmbiguousKind, Error};
+    ///
+    /// let timeout = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Timeout,
+    ///     message: "timeout after 30s".into(),
+    /// };
+    /// assert!(timeout.is_ambiguous());
+    /// assert!(!timeout.is_retryable());
+    /// assert_eq!(timeout.status(), None);
+    ///
+    /// let upstream = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Upstream { status: 503 },
+    ///     message: "provider answered http 503 after the submit".into(),
+    /// };
+    /// assert_eq!(upstream.status(), Some(503));
+    /// ```
+    #[error("request may have been processed ({kind}): {message}")]
     Ambiguous {
-        /// What was observed, for logs and for the reconciliation decision.
+        /// What was observed: the failure class, and the HTTP status when the
+        /// provider answered.
+        kind: AmbiguousKind,
+        /// What was observed, in prose, for logs.
         message: String,
     },
 
@@ -524,9 +680,12 @@ impl Error {
     /// its request is idempotent should pass that in instead.
     ///
     /// ```
-    /// use letterxpress::{Error, TransportKind};
+    /// use letterxpress::{AmbiguousKind, Error, TransportKind};
     ///
-    /// let ambiguous = Error::Ambiguous { message: "timeout after 30s".into() };
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Timeout,
+    ///     message: "timeout after 30s".into(),
+    /// };
     /// assert!(!ambiguous.is_retryable());
     /// assert!(ambiguous.is_ambiguous());
     ///
@@ -590,17 +749,24 @@ impl Error {
     /// The delay the provider asked for before the next attempt, when it asked
     /// for one.
     ///
-    /// `Some` only on [`Error::RateLimited`] that carried a parseable
-    /// `Retry-After`; `None` on every other error, and on a rate limit without
-    /// that header. The crate invents no delay of its own, so `None` is not by
-    /// itself a licence to retry at once: decide with
-    /// [`Error::is_retryable_for`] first, and pick your own backoff when the
-    /// provider sent no hint.
+    /// `Some(wait)` only on [`Error::RateLimited`] that carried a parseable
+    /// `Retry-After`, never longer than [`MAX_RETRY_AFTER`]. Waiting it and
+    /// retrying is safe: a `429` rejects the request before processing it.
+    /// `None` on every other error, and on a rate limit without that header.
+    /// The crate invents no delay of its own, so `None` is not by itself a
+    /// licence to retry at once: decide with [`Error::is_retryable_for`] first,
+    /// and pick your own backoff when the provider sent no hint.
+    ///
+    /// The accessor is the bounded view of [`Error::RateLimited`]'s
+    /// `retry_after` field. Decoding already clamps, and the cap is applied
+    /// here a second time, so a value built by hand cannot exceed the ceiling
+    /// either: a caller that only ever reads this method cannot be parked for a
+    /// day by a header it never sees.
     ///
     /// ```
     /// use std::time::Duration;
     ///
-    /// use letterxpress::Error;
+    /// use letterxpress::{Error, MAX_RETRY_AFTER};
     ///
     /// let limited = Error::RateLimited { retry_after: Some(Duration::from_secs(30)) };
     /// assert!(limited.is_retryable_for(true));
@@ -610,13 +776,17 @@ impl Error {
     /// assert!(no_hint.is_retryable_for(true));
     /// assert_eq!(no_hint.retry_after(), None, "no hint is not no wait");
     ///
+    /// // The provider asked for an hour: honour the ceiling, not the hour.
+    /// let absurd = Error::RateLimited { retry_after: Some(Duration::from_secs(3600)) };
+    /// assert_eq!(absurd.retry_after(), Some(MAX_RETRY_AFTER));
+    ///
     /// let gone = Error::NotFound { message: "gone".into() };
     /// assert_eq!(gone.retry_after(), None);
     /// ```
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after } => *retry_after,
+            Self::RateLimited { retry_after } => (*retry_after).map(bounded_retry_after),
             _ => None,
         }
     }
@@ -624,9 +794,13 @@ impl Error {
     /// Whether the provider may already have acted on this request.
     ///
     /// ```
-    /// use letterxpress::Error;
+    /// use letterxpress::{AmbiguousKind, Error};
     ///
-    /// assert!(Error::Ambiguous { message: "timeout".into() }.is_ambiguous());
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Io,
+    ///     message: "connection reset".into(),
+    /// };
+    /// assert!(ambiguous.is_ambiguous());
     /// assert!(!Error::NotFound { message: "gone".into() }.is_ambiguous());
     /// ```
     #[must_use]
@@ -636,8 +810,13 @@ impl Error {
 
     /// The HTTP status this error carries, when there was one.
     ///
+    /// An [`Error::Ambiguous`] carries the provider's code when its
+    /// [`kind`](Error::Ambiguous::kind) is [`AmbiguousKind::Upstream`], which is
+    /// exactly the case a reconciliation has to look up; a timeout or a
+    /// mid-flight failure has no status to report.
+    ///
     /// ```
-    /// use letterxpress::Error;
+    /// use letterxpress::{AmbiguousKind, Error};
     ///
     /// let err = Error::Unauthorized { message: "Unauthorized.".into() };
     /// assert_eq!(err.status(), Some(401));
@@ -648,6 +827,12 @@ impl Error {
     ///     message: String::new(),
     /// };
     /// assert_eq!(redirect.status(), Some(302));
+    ///
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Upstream { status: 500 },
+    ///     message: "provider answered http 500 after the submit".into(),
+    /// };
+    /// assert_eq!(ambiguous.status(), Some(500));
     /// ```
     #[must_use]
     pub fn status(&self) -> Option<u16> {
@@ -660,6 +845,7 @@ impl Error {
             Self::Rejected { status, .. }
             | Self::Upstream { status, .. }
             | Self::UnexpectedStatus { status, .. } => Some(*status),
+            Self::Ambiguous { kind, .. } => kind.status(),
             _ => None,
         }
     }
@@ -682,11 +868,27 @@ impl Error {
 }
 
 /// `Retry-After` rendered for `Display`, or nothing when it is unknown.
+///
+/// The seconds shown are the wait a caller may act on, so the value is bounded
+/// by [`MAX_RETRY_AFTER`] and the line always agrees with
+/// [`Error::retry_after`]. A provider that asked for longer — possible only for
+/// a hand-built value, decoding already clamps — is named as well, so a log
+/// line does not silently rewrite what it said.
 #[allow(clippy::ref_option)]
 fn retry_suffix(retry_after: &Option<Duration>) -> String {
-    retry_after.map_or_else(String::new, |duration| {
-        format!(", retry after {}s", duration.as_secs())
-    })
+    let Some(raw) = *retry_after else {
+        return String::new();
+    };
+    let wait = bounded_retry_after(raw);
+    if wait == raw {
+        format!(", retry after {}s", wait.as_secs())
+    } else {
+        format!(
+            ", retry after {}s (capped from {}s)",
+            wait.as_secs(),
+            raw.as_secs()
+        )
+    }
 }
 
 #[cfg(test)]
@@ -802,6 +1004,7 @@ mod tests {
                 Error::Rejected { status, .. }
                 | Error::Upstream { status, .. }
                 | Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::Ambiguous { kind, .. } => kind.status(),
                 _ => None,
             },
             fixed => fixed.parse::<u16>().ok(),
@@ -959,14 +1162,39 @@ mod tests {
                 },
             ),
             row(
-                "[`Error::Ambiguous`]",
+                "[`Error::Ambiguous`] / `Timeout`",
                 "none",
                 false,
                 false,
                 true,
                 false,
                 Error::Ambiguous {
+                    kind: AmbiguousKind::Timeout,
                     message: "timeout after 30s".into(),
+                },
+            ),
+            row(
+                "[`Error::Ambiguous`] / `Io`",
+                "none",
+                false,
+                false,
+                true,
+                false,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Io,
+                    message: "connection reset".into(),
+                },
+            ),
+            row(
+                "[`Error::Ambiguous`] / `Upstream`",
+                "carried",
+                false,
+                false,
+                true,
+                false,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: 502 },
+                    message: "provider answered http 502 after the submit".into(),
                 },
             ),
             row(
@@ -1162,8 +1390,13 @@ mod tests {
                         Error::Rejected { .. }
                             | Error::Upstream { .. }
                             | Error::UnexpectedStatus { .. }
+                            | Error::Ambiguous {
+                                kind: AmbiguousKind::Upstream { .. },
+                                ..
+                            }
                     ),
-                    "`{}`: only `Rejected`, `Upstream` and `UnexpectedStatus` carry a status",
+                    "`{}`: only `Rejected`, `Upstream`, `UnexpectedStatus` and \
+                     `Ambiguous`/`Upstream` carry a status",
                     row.label
                 );
             }
@@ -1188,8 +1421,8 @@ mod tests {
         assert_eq!(labels.len(), rows.len(), "two rows share a label");
         assert_eq!(
             rows.len(),
-            VARIANTS.len() + 3,
-            "the four `Transport` kinds are the only repeated variant"
+            VARIANTS.len() + 5,
+            "the four `Transport` kinds and the three `Ambiguous` kinds are the only repeats"
         );
     }
 
@@ -1264,6 +1497,71 @@ mod tests {
                 kind.to_string(),
                 kind_name(*kind).to_ascii_lowercase(),
                 "`{label}`: `Display` spells the kind the way the row does"
+            );
+        }
+    }
+
+    /// Every [`AmbiguousKind`], listed so that a new kind cannot stay out of
+    /// the documented table: [`ambiguous_kind_name`] matches without a wildcard
+    /// arm, so the build breaks first.
+    const AMBIGUOUS_KINDS: &[AmbiguousKind] = &[
+        AmbiguousKind::Timeout,
+        AmbiguousKind::Io,
+        AmbiguousKind::Upstream { status: 502 },
+    ];
+
+    /// The `AmbiguousKind` name the table's second column spells, matched with
+    /// **no** wildcard arm.
+    fn ambiguous_kind_name(kind: AmbiguousKind) -> &'static str {
+        match kind {
+            AmbiguousKind::Timeout => "Timeout",
+            AmbiguousKind::Io => "Io",
+            AmbiguousKind::Upstream { .. } => "Upstream",
+        }
+    }
+
+    /// The three `Ambiguous` rows are one per kind, labelled exactly as the
+    /// table spells them, and each one answers with the kind's own status.
+    /// `AmbiguousKind` is `#[non_exhaustive]` as well, so this is the check
+    /// that would catch a kind added without a row.
+    #[test]
+    fn every_ambiguous_kind_has_exactly_one_documented_row() {
+        let rows = table();
+        let ambiguous: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(&row.error, Error::Ambiguous { .. }))
+            .collect();
+        assert_eq!(
+            ambiguous.len(),
+            AMBIGUOUS_KINDS.len(),
+            "one `Ambiguous` row per kind, and no kind twice"
+        );
+
+        for kind in AMBIGUOUS_KINDS {
+            let label = format!("[`Error::Ambiguous`] / `{}`", ambiguous_kind_name(*kind));
+            let matching: Vec<&Row> = ambiguous
+                .iter()
+                .copied()
+                .filter(|row| row.label == label)
+                .collect();
+            assert_eq!(matching.len(), 1, "no single row spells `{label}`");
+            let row = &matching[0];
+
+            let sample = Error::Ambiguous {
+                kind: *kind,
+                message: "sample".into(),
+            };
+            assert_eq!(
+                documented_status(row),
+                kind.status(),
+                "`{label}`: the row and its kind disagree on the status"
+            );
+            assert_eq!(sample.status(), kind.status(), "`{label}`: status");
+            assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
+            assert_eq!(row.ambiguous, sample.is_ambiguous(), "`{label}`: ambiguous");
+            assert!(
+                sample.to_string().contains(&kind.to_string()),
+                "`{label}`: `Display` names the kind the table names"
             );
         }
     }
