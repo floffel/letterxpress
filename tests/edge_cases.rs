@@ -5,15 +5,85 @@
 mod common;
 
 use common::{client_with, fixture, pdf};
-use letterxpress::transport::{MockTransport, Response, Transport};
+use letterxpress::transport::{Method, MockTransport, Response, Transport};
 use letterxpress::{
     AmbiguousKind, Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus,
-    Letter, Mode, Money, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
-    MAX_PDF_BYTES,
+    Letter, Mode, Money, MoneyError, PrintJob, Registered, Shipping, TransportKind,
+    MAX_NOTICE_CHARS, MAX_PDF_BYTES,
 };
 
 fn client_for(status: u16, body: &str) -> Client<MockTransport> {
     client_with(vec![Response::json_response(status, body.to_string())])
+}
+
+fn client_for_with_retry_after(status: u16, body: String) -> Client<MockTransport> {
+    client_with(vec![Response::new(
+        status,
+        [("Retry-After".to_string(), "30".to_string())],
+        body.into_bytes(),
+    )])
+}
+
+fn expected_status_error(status: u16) -> Error {
+    match status {
+        401 => Error::Unauthorized {
+            message: String::new(),
+        },
+        403 => Error::Forbidden {
+            message: String::new(),
+        },
+        404 => Error::NotFound {
+            message: String::new(),
+        },
+        405 => Error::MethodNotAllowed {
+            message: String::new(),
+        },
+        429 => Error::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        },
+        500..=599 => Error::Upstream {
+            status,
+            message: String::new(),
+        },
+        400..=499 => Error::Rejected {
+            status,
+            message: String::new(),
+        },
+        _ => Error::UnexpectedShape {
+            endpoint: "GET /v3/balance",
+            message: String::new(),
+            source: None,
+        },
+    }
+}
+
+fn assert_same_classification(actual: &Error, expected: &Error, context: &str) {
+    assert_eq!(
+        std::mem::discriminant(actual),
+        std::mem::discriminant(expected),
+        "{context}: {actual:?} != {expected:?}"
+    );
+    assert_eq!(actual.status(), expected.status(), "{context}: status");
+    assert_eq!(
+        actual.is_retryable(),
+        expected.is_retryable(),
+        "{context}: retryable"
+    );
+    assert_eq!(
+        actual.is_retryable_for(true),
+        expected.is_retryable_for(true),
+        "{context}: retryable for an idempotent request"
+    );
+    assert_eq!(
+        actual.is_ambiguous(),
+        expected.is_ambiguous(),
+        "{context}: ambiguous"
+    );
+    assert_eq!(
+        actual.retry_after(),
+        expected.retry_after(),
+        "{context}: retry-after"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +197,92 @@ async fn malformed_json_on_success_is_a_json_error() {
 }
 
 #[tokio::test]
+async fn decoded_shape_failures_keep_the_serde_error_reachable() {
+    // Just inside: a provider can add fields without breaking a read.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"id":6035143,"items":[],"provider_added":"new"}}"#,
+    );
+    let job = client
+        .print_job(&JobId::new("6035143").expect("id"))
+        .await
+        .expect("unknown fields stay ignored");
+    assert_eq!(job.id.as_str(), "6035143");
+
+    // Just outside: the same endpoint rejects a wrong type. Before the fix the
+    // serde error was rendered into `message` and `source()` returned `None`.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"id":6035143,"items":"not a list"}}"#,
+    );
+    let error = client
+        .print_job(&JobId::new("6035143").expect("id"))
+        .await
+        .expect_err("a wrong item shape cannot be decoded");
+
+    let source = std::error::Error::source(&error).expect("the serde cause stays reachable");
+    let source = source
+        .downcast_ref::<serde_json::Error>()
+        .expect("the source is the original serde_json error");
+    assert_eq!(source.classify(), serde_json::error::Category::Data);
+    assert!(error.to_string().contains("items"), "{error}");
+    assert!(!error.is_retryable_for(true), "the same bytes fail again");
+}
+
+#[tokio::test]
+async fn email_page_shape_failures_keep_the_serde_error_reachable() {
+    // Just inside: unknown job fields do not prevent the page from decoding.
+    let client = client_for(
+        200,
+        r#"{"status":200,"data":{"emailjobs":[{"id":1,"provider_added":true}]}}"#,
+    );
+    let page = client
+        .email_jobs(&letterxpress::EmailJobQuery::new())
+        .await
+        .expect("unknown fields stay ignored");
+    assert_eq!(page.jobs.len(), 1);
+
+    // Just outside: `emailjobs` must be an array.
+    let client = client_for(200, r#"{"status":200,"data":{"emailjobs":{}}}"#);
+    let error = client
+        .email_jobs(&letterxpress::EmailJobQuery::new())
+        .await
+        .expect_err("an object is not a job list");
+
+    let source = std::error::Error::source(&error).expect("the serde cause stays reachable");
+    let source = source
+        .downcast_ref::<serde_json::Error>()
+        .expect("the source is the original serde_json error");
+    assert_eq!(source.classify(), serde_json::error::Category::Data);
+    assert!(matches!(
+        error,
+        Error::UnexpectedShape {
+            endpoint: "GET /v3/emailjobs",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn email_submit_shape_failures_remain_ambiguous() {
+    let letter = Letter::new(&pdf())
+        .expect("letter")
+        .with_email(
+            EmailDelivery::new("kunde@example.de", EmailOption::MailSecure).expect("delivery"),
+        )
+        .expect("email");
+    let client = client_for(200, r#"{"status":200,"data":{"nothing":true}}"#);
+    let error = client
+        .submit_email_job(&letter)
+        .await
+        .expect_err("the job may already exist");
+
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("undecodable body"), "{error}");
+}
+
+#[tokio::test]
 async fn duplicate_keys_take_the_last_value() {
     // JSON with repeated keys is invalid-but-common; `serde_json` keeps the
     // last occurrence, which is what every other JSON parser does too.
@@ -213,6 +369,57 @@ async fn rate_limit_without_a_retry_after_header_still_maps() {
     match client.balance().await.expect_err("must fail") {
         Error::RateLimited { retry_after } => assert_eq!(retry_after, None),
         other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_body_level_rate_limit_on_submit_stays_retryable() {
+    let client = client_for_with_retry_after(
+        200,
+        r#"{"status":429,"message":"Too Many Requests"}"#.to_string(),
+    );
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+
+    assert!(error.is_retryable());
+    assert!(!error.is_ambiguous());
+    assert_eq!(error.status(), Some(429));
+    match error {
+        Error::RateLimited { retry_after } => {
+            assert_eq!(retry_after, Some(std::time::Duration::from_secs(30)));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_body_level_rate_limit_without_a_retry_after_header_still_maps() {
+    let client = client_for(200, r#"{"status":429,"message":"Too Many Requests"}"#);
+    match client.balance().await.expect_err("must fail") {
+        Error::RateLimited { retry_after } => assert_eq!(retry_after, None),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn every_4xx_and_5xx_has_the_same_body_and_http_classification() {
+    for status in 400..=599 {
+        let http =
+            client_for_with_retry_after(status, format!(r#"{{"message":"status {status}"}}"#));
+        let body = client_for_with_retry_after(
+            200,
+            format!(r#"{{"status":{status},"message":"status {status}"}}"#),
+        );
+        let http_error = http.balance().await.expect_err("HTTP status must fail");
+        let body_error = body.balance().await.expect_err("body status must fail");
+        let expected = expected_status_error(status);
+        let context = format!("status {status}");
+
+        assert_same_classification(&http_error, &expected, &format!("{context} over HTTP"));
+        assert_same_classification(&body_error, &expected, &format!("{context} in the body"));
+        assert_same_classification(&body_error, &http_error, &format!("{context} parity"));
     }
 }
 
@@ -424,7 +631,7 @@ async fn unicode_addresses_survive_unchanged() {
         job.filename_original.as_deref(),
         Some("Straßenfest 会议.pdf")
     );
-    assert_eq!(job.total().cents(), 250);
+    assert_eq!(job.total().expect("total").cents(), 250);
 }
 
 #[tokio::test]
@@ -537,7 +744,7 @@ async fn a_submit_timeout_is_ambiguous_and_sent_once() {
     let recorder = letterxpress::transport::RecordingTransport::new(MockTransport::new([Err(
         Error::Transport {
             kind: TransportKind::Timeout,
-            message: "operation timed out".into(),
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
         },
     )]));
     let client = Client::new(
@@ -575,7 +782,7 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Connect,
-            message: "dns failure".into(),
+            source: Box::new(std::io::Error::other("dns failure")),
         })]),
         Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
     );
@@ -597,20 +804,28 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
         ),
         "a connect-phase failure stays a plain transport error: {error:?}"
     );
+    assert!(error.is_retryable_for(Method::Post.is_idempotent()));
 }
 
 #[tokio::test]
-async fn a_read_timeout_stays_retryable() {
+async fn a_read_timeout_is_retryable_for_the_read_but_not_by_default() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Timeout,
-            message: "timed out".into(),
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
         })]),
         Credentials::new("kunde", "key", Mode::Test).expect("credentials"),
     );
     let error = client.balance().await.expect_err("must fail");
     assert!(!error.is_ambiguous());
-    assert!(error.is_retryable());
+    assert!(
+        error.is_retryable_for(Method::Get.is_idempotent()),
+        "the same failure on a submit would be ambiguous"
+    );
+    assert!(
+        !error.is_retryable(),
+        "the context-free answer stays the submit one"
+    );
 }
 
 #[tokio::test]
@@ -632,11 +847,20 @@ async fn a_submit_5xx_is_ambiguous_but_a_read_5xx_is_not() {
         ),
         "{error:?}"
     );
+    assert!(!error.is_retryable_for(Method::Post.is_idempotent()));
     assert!(error.to_string().contains("http 500"));
 
     let client = client_for(500, r#"{"message":"Internal Server Error"}"#);
     let error = client.balance().await.expect_err("must fail");
     assert!(!error.is_ambiguous());
+    assert!(
+        error.is_retryable_for(Method::Get.is_idempotent()),
+        "a 5xx answer on a read is safe to retry"
+    );
+    assert!(
+        !error.is_retryable(),
+        "but a submit could already be billed"
+    );
     assert!(matches!(error, Error::Upstream { status: 500, .. }));
 }
 
@@ -680,7 +904,7 @@ async fn a_submit_io_failure_is_its_own_kind() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Io,
-            message: "connection reset by peer".into(),
+            source: Box::new(std::io::Error::other("connection reset by peer")),
         })]),
         Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
     );
@@ -957,10 +1181,40 @@ fn filenames_cannot_smuggle_a_path() {
 
 #[test]
 fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
-    let international = Letter::new(&pdf())
+    // Valid: registered mail on the class it requires, in either order.
+    let national = Letter::new(&pdf())
         .expect("letter")
-        .with_shipping(Shipping::International);
-    let error = international
+        .with_shipping(Shipping::National)
+        .expect("national")
+        .with_registered(Registered::EinschreibenEinwurf)
+        .expect("registered");
+    assert_eq!(national.to_json()["registered"], "r1");
+    assert_eq!(national.to_json()["specification"]["shipping"], "national");
+
+    let registered_first = Letter::new(&pdf())
+        .expect("letter")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered")
+        .with_shipping(Shipping::National)
+        .expect("national");
+    assert_eq!(
+        registered_first.to_json()["specification"]["shipping"],
+        "national"
+    );
+
+    // Just inside the limit: `Auto` is not international, so the pair stays legal.
+    assert!(Letter::new(&pdf())
+        .expect("letter")
+        .with_shipping(Shipping::Auto)
+        .expect("auto")
+        .with_registered(Registered::Einschreiben)
+        .is_ok());
+
+    // Just outside: international, whichever setter runs first.
+    let error = Letter::new(&pdf())
+        .expect("letter")
+        .with_shipping(Shipping::International)
+        .expect("international")
         .with_registered(Registered::EinschreibenEinwurf)
         .expect_err("must fail");
     assert!(matches!(
@@ -971,11 +1225,78 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
         }
     ));
 
+    let registered = Letter::new(&pdf())
+        .expect("letter")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered");
+    let error = registered
+        .clone()
+        .with_shipping(Shipping::International)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "letter.specification.shipping",
+            ..
+        }
+    ));
+
+    // Replacing the whole specification is the third way into the same pair.
+    let international = letterxpress::Specification::new().with_shipping(Shipping::International);
+    assert!(registered
+        .clone()
+        .with_specification(international)
+        .is_err());
+
+    // A carry-all spelling of the same wire value cannot slip past the rule,
+    // padded or not.
+    let smuggled = Shipping::from_wire("International");
+    assert!(matches!(smuggled, Shipping::International));
+    assert!(registered
+        .clone()
+        .with_shipping(Shipping::Other("international".into()))
+        .is_err());
+    assert!(registered
+        .clone()
+        .with_shipping(Shipping::Other("  international  ".into()))
+        .is_err());
+}
+
+#[test]
+fn a_price_request_carries_the_same_pair_and_the_same_rule() {
     let international = letterxpress::PriceRequest::new(1)
         .expect("price")
-        .with_shipping(Shipping::International);
-    assert!(international
+        .with_shipping(Shipping::International)
+        .expect("international");
+    let error = international
         .with_registered(Registered::Einschreiben)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "price.registered",
+            ..
+        }
+    ));
+
+    let registered = letterxpress::PriceRequest::new(1)
+        .expect("price")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered");
+    let error = registered
+        .clone()
+        .with_shipping(Shipping::International)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "price.specification.shipping",
+            ..
+        }
+    ));
+    assert!(registered.clone().with_shipping(Shipping::National).is_ok());
+    assert!(registered
+        .with_shipping(Shipping::Other("international".into()))
         .is_err());
 }
 
@@ -1206,9 +1527,37 @@ fn the_base_url_must_be_https_without_userinfo() {
         "https://api.letterxpress.de/v3?x=1",
         "https://api.letterxpress.de/v3#frag",
         "https://",
+        "https:///v3",
+        "https://:8443",
+        "https:////",
+        "https:////v3",
+        "https://./v3",
+        "https://api.letterxpress.de:65536/v3",
+        "https://api.letterxpress.de:not-a-port/v3",
         "https://api.letterxpress .de/v3",
     ] {
-        assert!(client.clone().with_base_url(bad).is_err(), "{bad:?}");
+        let error = client
+            .clone()
+            .with_base_url(bad)
+            .expect_err("an invalid base URL must be refused");
+        assert!(
+            matches!(
+                error,
+                Error::Validation {
+                    field: "base_url",
+                    ..
+                }
+            ),
+            "{bad:?}: {error:?}"
+        );
+    }
+    for good in [
+        "https://a",
+        "https://api.letterxpress.de:65535/v3",
+        "https://[::1]:65535/v3",
+        "HTTPS://api.letterxpress.de/v3",
+    ] {
+        assert!(client.clone().with_base_url(good).is_ok(), "{good:?}");
     }
     assert_eq!(
         client
@@ -1311,20 +1660,65 @@ fn a_hand_built_page_total_saturates_instead_of_wrapping() {
 
 #[test]
 fn money_helpers_are_stable_at_the_boundaries() {
-    assert_eq!(Money::from_cents(0).cents(), 0);
-    assert_eq!(Money::from_cents(-1).cents(), -1);
-    assert_eq!(Money::from_euros(f64::NAN).cents(), 0, "no panic on NaN");
+    assert_eq!(Money::from_cents(0).map(Money::cents), Ok(0));
+    assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
+    assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
     assert_eq!(
-        Money::from_euros(f64::INFINITY).cents(),
-        i64::MAX,
-        "saturating"
+        Money::from_cents(i64::MAX)
+            .expect("max")
+            .checked_add(Money::from_cents(1).expect("one")),
+        Err(MoneyError::OutOfRange)
+    );
+
+    assert_eq!(Money::from_euros(f64::NAN), Err(MoneyError::NotFinite));
+    assert_eq!(Money::from_euros(f64::INFINITY), Err(MoneyError::NotFinite));
+    assert_eq!(Money::from_euros(-0.01), Err(MoneyError::Negative));
+    assert_eq!(Money::from_euros(f64::MAX), Err(MoneyError::OutOfRange));
+    assert_eq!(
+        Money::from_euros(4.999).map(Money::cents),
+        Ok(500),
+        "rounds half-up"
     );
     assert_eq!(
-        Money::from_euros(0.005).cents(),
-        1,
-        "rounds half away from zero"
+        Money::from_euros(1_000_000.0).expect("valid").to_string(),
+        "1000000.00"
     );
-    assert_eq!(Money::from_euros(1_000_000.0).to_string(), "1000000.00");
+
+    let sum = Money::from_euros(0.1)
+        .expect("0.1")
+        .checked_add(Money::from_euros(0.2).expect("0.2"))
+        .expect("sum");
+    assert_eq!(sum.cents(), 30, "0.1 + 0.2 is exact in cents");
+}
+
+#[test]
+fn money_deserialisation_rejects_non_finite_negative_and_overflowing_values() {
+    for bad in [
+        "NaN",
+        "inf",
+        "-inf",
+        "1e400",
+        "-0.01",
+        "9223372036854775808",
+    ] {
+        assert!(
+            serde_json::from_str::<Money>(&format!("\"{bad}\"")).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(serde_json::from_str::<Money>("-1").is_err());
+    assert!(serde_json::from_str::<Money>("1e400").is_err());
+    assert!(serde_json::from_str::<Money>(&i64::MAX.to_string()).is_err());
+    assert_eq!(serde_json::from_str::<Money>("0").expect("zero").cents(), 0);
+}
+
+#[test]
+fn money_deserialisation_keeps_unknown_enclosing_fields_permissive() {
+    let balance: letterxpress::Balance = serde_json::from_str(
+        r#"{"balance":"54.89","currency":"EUR","future_field":{"nested":true}}"#,
+    )
+    .expect("unknown fields stay ignored");
+    assert_eq!(balance.cents(), 5_489);
 }
 
 #[test]
@@ -1340,6 +1734,44 @@ fn invoice_pdf_and_journal_csv_report_missing_payloads() {
     let journal: letterxpress::Journal =
         serde_json::from_str(r#"{"csv_base64":"////"}"#).expect("journal");
     assert!(matches!(journal.csv(), Err(Error::Utf8 { .. })));
+}
+
+#[test]
+fn a_decodable_payload_keeps_the_decoder_error_reachable() {
+    use base64::Engine as _;
+
+    // The valid value.
+    let document: letterxpress::InvoiceDocument =
+        serde_json::from_str(r#"{"id":1,"base64_data":"JVBERi0xLjQ="}"#).expect("invoice");
+    assert_eq!(
+        document.pdf().expect("a valid payload decodes"),
+        b"%PDF-1.4"
+    );
+
+    // Just outside it: one illegal symbol. The decoder's own error survives as
+    // the `source`, so a caller can branch on the failure instead of parsing
+    // the rendered sentence.
+    let encoded = "JVBERi0xLjQ!";
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect_err("the fixture must be invalid base64");
+    let document: letterxpress::InvoiceDocument =
+        serde_json::from_str(&format!(r#"{{"id":1,"base64_data":"{encoded}"}}"#)).expect("invoice");
+    let error = document.pdf().expect_err("an illegal symbol must fail");
+
+    let Error::Base64 { field, source } = &error else {
+        panic!("expected Error::Base64, got {error:?}");
+    };
+    assert_eq!(*field, "invoice.base64_data");
+    assert_eq!(*source, expected, "the decoder's error, not its text");
+    assert_eq!(
+        error.to_string(),
+        format!("invalid base64 in `invoice.base64_data`: {source}")
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the cause is reachable, not flattened"
+    );
 }
 
 #[tokio::test]

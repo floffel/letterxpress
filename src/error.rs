@@ -1,14 +1,29 @@
 //! Everything this crate can fail with, and what the caller can do about it.
 //!
-//! One `#[non_exhaustive]` enum with a `source` chain. Two questions have a
-//! dedicated answer, because they decide whether a letter is sent twice:
+//! One `#[non_exhaustive]` enum with a `source` chain: every variant that wraps
+//! a lower-level failure keeps it as `#[source]` — [`Error::Json`] the
+//! `serde_json` error, [`Error::Transport`] the transport's own error,
+//! [`Error::Base64`] the decoder's, and [`Error::UnexpectedShape`] the
+//! `serde_json` error that rejected a decoded payload — so a `source()` walk
+//! gets past the variant to the failure that actually explains it. Two
+//! questions decide whether a letter is sent twice, and the error alone cannot
+//! answer either:
 //!
-//! * [`Error::is_retryable`] — "another attempt is safe **and** likely to
-//!   succeed". Only connection failures and rate limiting qualify.
+//! * [`Error::is_retryable_for`] — "another attempt is safe **and** likely to
+//!   succeed **for this request**". Whether the request is idempotent is part
+//!   of the question: a 5xx or a connection that broke mid-flight is a safe
+//!   retry for a `GET`, and an unanswerable one for a submit that may already
+//!   have produced a billed letter. [`Error::is_retryable`] is the conservative
+//!   half — the answer for a request that is *not* idempotent — so a caller
+//!   that cannot name the request still cannot duplicate one.
 //! * [`Error::is_ambiguous`] — "the provider may already have processed this
 //!   request". A retry can produce a second, billed letter. The only safe
 //!   recovery is to look the job up (by `notice` or the job list) before
 //!   resubmitting.
+//!
+//! A retry that is allowed is not always a retry that is due: [`Error::retry_after`]
+//! carries the provider's own backoff hint when it sent one, and the crate
+//! invents no delay of its own.
 
 use std::time::Duration;
 
@@ -35,7 +50,8 @@ pub enum TransportKind {
     /// ```
     /// use letterxpress::TransportKind;
     ///
-    /// assert!(TransportKind::Timeout.is_retryable());
+    /// assert!(TransportKind::Timeout.is_retryable_for(true));
+    /// assert!(!TransportKind::Timeout.is_retryable());
     /// ```
     Timeout,
     /// The connection broke mid-flight (reset, truncated body, TLS alert).
@@ -43,7 +59,8 @@ pub enum TransportKind {
     /// ```
     /// use letterxpress::TransportKind;
     ///
-    /// assert!(TransportKind::Io.is_retryable());
+    /// assert!(TransportKind::Io.is_retryable_for(true));
+    /// assert!(!TransportKind::Io.is_retryable());
     /// ```
     Io,
     /// The transport refused to build the request — a local configuration or
@@ -53,23 +70,55 @@ pub enum TransportKind {
     /// use letterxpress::TransportKind;
     ///
     /// assert!(!TransportKind::Protocol.is_retryable());
+    /// assert!(!TransportKind::Protocol.is_retryable_for(true));
     /// ```
     Protocol,
 }
 
 impl TransportKind {
-    /// Whether a *fresh* attempt is safe for an idempotent request.
+    /// Whether a fresh attempt is safe even for a request that is **not**
+    /// idempotent — a submit, where a second attempt can bill twice.
+    ///
+    /// True only for [`TransportKind::Connect`], where nothing reached the
+    /// provider. This is [`TransportKind::is_retryable_for`] with `false`; a
+    /// read can also retry a timeout or a mid-flight failure.
     ///
     /// ```
     /// use letterxpress::TransportKind;
     ///
     /// assert!(TransportKind::Connect.is_retryable());
+    /// assert!(!TransportKind::Timeout.is_retryable());
     /// assert!(!TransportKind::Protocol.is_retryable());
     /// ```
     #[must_use]
     pub fn is_retryable(self) -> bool {
+        self.is_retryable_for(false)
+    }
+
+    /// Whether a fresh attempt is safe, given whether the failed request is
+    /// idempotent.
+    ///
+    /// A connection that was never established wrote nothing, so it is safe
+    /// whatever the request was. A timeout or a broken connection may have
+    /// delivered the request: safe for a read, duplicate-prone for a submit.
+    /// An adapter that refused to build the request fails the same way again,
+    /// so it is never retryable.
+    ///
+    /// ```
+    /// use letterxpress::{Method, TransportKind};
+    ///
+    /// // The same failure, decided by the request it belongs to.
+    /// assert!(!TransportKind::Io.is_retryable_for(Method::Post.is_idempotent()));
+    /// assert!(TransportKind::Io.is_retryable_for(Method::Get.is_idempotent()));
+    ///
+    /// // Nothing was written, so even a submit is safe to repeat.
+    /// assert!(TransportKind::Connect.is_retryable_for(Method::Post.is_idempotent()));
+    /// ```
+    #[must_use]
+    pub fn is_retryable_for(self, idempotent: bool) -> bool {
         match self {
-            Self::Connect | Self::Timeout | Self::Io => true,
+            Self::Connect => true,
+            Self::Timeout | Self::Io => idempotent,
             Self::Protocol => false,
         }
     }
@@ -178,62 +227,77 @@ impl std::fmt::Display for AmbiguousKind {
 /// One row per variant; [`Error::Transport`] is split by [`TransportKind`] and
 /// [`Error::Ambiguous`] by [`AmbiguousKind`], because in both cases the kind is
 /// what decides. This table *is* the contract:
-/// [`Error::status`], [`Error::is_retryable`] and [`Error::is_ambiguous`] answer
-/// for every variant exactly as listed, and the test module at the end of this
-/// file asserts the code and the text of the table against each other, so a
-/// variant cannot arrive without a documented stance.
+/// [`Error::status`], [`Error::is_retryable`], [`Error::is_retryable_for`],
+/// [`Error::is_ambiguous`] and [`Error::retry_after`] answer for every variant
+/// exactly as listed, and the test module at the end of this file asserts the
+/// code and the text of the table against each other, so a variant cannot
+/// arrive without a documented stance.
 ///
 /// In the `status()` column, `none` means the error carries no HTTP status and
-/// `carried` means the code the response had is reported back.
+/// `carried` means the code the response had is reported back. `retry_after()`
+/// answers `yes` only for a rate limit that carried the provider's hint.
 ///
-/// | Variant | `status()` | `is_retryable()` | `is_ambiguous()` |
-/// | --- | --- | --- | --- |
-/// | [`Error::Validation`] | none | no | no |
-/// | [`Error::Unauthorized`] | 401 | no | no |
-/// | [`Error::Forbidden`] | 403 | no | no |
-/// | [`Error::NotFound`] | 404 | no | no |
-/// | [`Error::MethodNotAllowed`] | 405 | no | no |
-/// | [`Error::RateLimited`] | 429 | yes | no |
-/// | [`Error::Rejected`] | carried | no | no |
-/// | [`Error::Upstream`] | carried | no | no |
-/// | [`Error::UnexpectedStatus`] | carried | no | no |
-/// | [`Error::Ambiguous`] / `Timeout` | none | no | yes |
-/// | [`Error::Ambiguous`] / `Io` | none | no | yes |
-/// | [`Error::Ambiguous`] / `Upstream` | carried | no | yes |
-/// | [`Error::Transport`] / `Connect` | none | yes | no |
-/// | [`Error::Transport`] / `Timeout` | none | yes | no |
-/// | [`Error::Transport`] / `Io` | none | yes | no |
-/// | [`Error::Transport`] / `Protocol` | none | no | no |
-/// | [`Error::Json`] | none | no | no |
-/// | [`Error::MissingField`] | none | no | no |
-/// | [`Error::UnexpectedShape`] | none | no | no |
-/// | [`Error::TooLarge`] | none | no | no |
-/// | [`Error::Base64`] | none | no | no |
-/// | [`Error::Utf8`] | none | no | no |
+/// `is_retryable()` is the answer for a request that is **not** idempotent — a
+/// submit — and equals `is_retryable_for(false)`; the next column is the answer
+/// for a read, a `PUT` or a `DELETE`.
 ///
-/// A `yes` in `is_retryable()` is narrower than it reads: `RateLimited` is
-/// retryable only once `Retry-After` has elapsed, and the transport kinds are
-/// retryable on an idempotent call. Variant by variant:
+/// | Variant | `status()` | `is_retryable()` | `is_retryable_for(true)` | `is_ambiguous()` | `retry_after()` |
+/// | --- | --- | --- | --- | --- | --- |
+/// | [`Error::Validation`] | none | no | no | no | no |
+/// | [`Error::Unauthorized`] | 401 | no | no | no | no |
+/// | [`Error::Forbidden`] | 403 | no | no | no | no |
+/// | [`Error::NotFound`] | 404 | no | no | no | no |
+/// | [`Error::MethodNotAllowed`] | 405 | no | no | no | no |
+/// | [`Error::RateLimited`] | 429 | yes | yes | no | yes |
+/// | [`Error::Rejected`] | carried | no | no | no | no |
+/// | [`Error::Upstream`] | carried | no | yes | no | no |
+/// | [`Error::UnexpectedStatus`] | carried | no | no | no | no |
+/// | [`Error::Ambiguous`] / `Timeout` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Io` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Upstream` | carried | no | no | yes | no |
+/// | [`Error::Transport`] / `Connect` | none | yes | yes | no | no |
+/// | [`Error::Transport`] / `Timeout` | none | no | yes | no | no |
+/// | [`Error::Transport`] / `Io` | none | no | yes | no | no |
+/// | [`Error::Transport`] / `Protocol` | none | no | no | no | no |
+/// | [`Error::Json`] | none | no | no | no | no |
+/// | [`Error::MissingField`] | none | no | no | no | no |
+/// | [`Error::UnexpectedShape`] | none | no | no | no | no |
+/// | [`Error::TooLarge`] | none | no | no | no | no |
+/// | [`Error::Base64`] | none | no | no | no | no |
+/// | [`Error::Utf8`] | none | no | no | no | no |
+///
+/// A `yes` in either retry column is narrower than it reads: `RateLimited` is
+/// retryable only once [`Error::retry_after`] has elapsed, and the transport
+/// kinds are retryable only when the request may be repeated. Variant by
+/// variant:
 ///
 /// * `Validation` — the request was never sent, so the input has to change.
 /// * `Unauthorized`, `Forbidden` — the credential has to change.
 /// * `NotFound`, `MethodNotAllowed` — the resource or the verb is wrong.
 /// * `RateLimited` — the provider dropped the request before processing it, so
-///   a fresh attempt is safe *and* likely to succeed.
+///   a fresh attempt is safe *and* likely to succeed, whichever way the
+///   request was made. The wait is the provider's to set: when `retry_after()`
+///   answers, honour it before the next attempt.
 /// * `Rejected` — the provider refused the body; the same body is refused
 ///   again.
 /// * `Upstream` — the provider answered with a 5xx, so it is reachable and the
 ///   call failed there. For a read it is safe to try again; for a submit the
 ///   5xx may arrive after the job was created, which is why the client turns a
-///   5xx on a submit into [`Error::Ambiguous`] instead of `Upstream`. A caller
-///   that deliberately retries a failed read gets `Upstream` and decides for
-///   itself.
+///   5xx on a submit into [`Error::Ambiguous`] instead of `Upstream`.
+///   `is_retryable_for(true)` says the read is safe; nothing is left for the
+///   caller to special-case.
 /// * `Ambiguous` — the provider may already have acted on the request. A retry
 ///   can produce a second, billed letter, so reconcile first; this is the only
-///   variant for which `is_ambiguous()` is true. Its [`kind`](Error::Ambiguous::kind)
-///   says what was observed: `Timeout` and `Io` mean no usable answer arrived,
-///   `Upstream { status }` means the provider answered and that code is what
-///   [`Error::status`] returns.
+///   variant for which `is_ambiguous()` is true, and no context makes it
+///   retryable. Its [`kind`](Error::Ambiguous::kind) says what was observed:
+///   `Timeout` and `Io` mean no usable answer arrived, `Upstream { status }`
+///   means the provider answered and that code is what [`Error::status`]
+///   returns.
+/// * `Transport` — a connection that was never established (`Connect`) cannot
+///   have submitted a letter, so it is retryable in both contexts. `Timeout`
+///   and `Io` may have delivered the request: retryable for a read only. The
+///   client already promotes those two on a submit to [`Error::Ambiguous`]; the
+///   predicate agrees with that rewrite instead of contradicting it.
 /// * `Json`, `MissingField`, `UnexpectedShape` — the answer was unusable. On a
 ///   submit the client reports [`Error::Ambiguous`] instead, because a 2xx
 ///   means the job exists and is billed. `Json` carries no status because it is
@@ -256,10 +320,12 @@ impl std::fmt::Display for AmbiguousKind {
 /// [`Error::Ambiguous`]; on an idempotent call it remains terminal.
 ///
 /// ```
-/// use letterxpress::Error;
+/// use letterxpress::{Error, Method};
 ///
 /// let err = Error::RateLimited { retry_after: Some(std::time::Duration::from_secs(30)) };
 /// assert!(err.is_retryable());
+/// assert!(err.is_retryable_for(Method::Post.is_idempotent()));
+/// assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 /// assert!(!err.is_ambiguous());
 /// assert_eq!(err.status(), Some(429));
 /// ```
@@ -308,19 +374,22 @@ pub enum Error {
         message: String,
     },
 
-    /// The documented limit of 120 requests per minute was hit (HTTP 429).
+    /// The documented limit of 120 requests per minute was hit, either as an
+    /// HTTP 429 or as a body-level `status` of 429 when the HTTP status was
+    /// 2xx.
     ///
     /// Retrying is safe: the provider rejected the request before processing
-    /// it. `retry_after` is the `Retry-After` header when the provider sent a
-    /// parseable one.
+    /// it. `retry_after` is the `Retry-After` response header when the provider
+    /// sent a parseable one, whichever path carried the 429.
     #[error("letterxpress rate limit reached{}", retry_suffix(.retry_after))]
     RateLimited {
         /// `Retry-After` as a duration, when present and parseable.
         retry_after: Option<Duration>,
     },
 
-    /// The provider refused the request body (HTTP 400, or a body `status`
-    /// in the 4xx range). Nothing was created.
+    /// The provider refused the request body (HTTP 400, or a body `status` in
+    /// the 4xx range other than codes with their own variant, such as 401,
+    /// 403, 404, 405 and 429). Nothing was created.
     #[error("letterxpress rejected the request (http {status}): {message}")]
     Rejected {
         /// HTTP status, or the body `status` when the HTTP status was 2xx.
@@ -413,12 +482,30 @@ pub enum Error {
     },
 
     /// No response was obtained from the provider.
-    #[error("transport error ({kind}): {message}")]
+    ///
+    /// `source` is the transport's own failure — `reqwest`/`hyper`/`rustls`
+    /// with the real stack, or whatever a custom
+    /// [`Transport`](crate::transport::Transport) implementation returns — kept
+    /// typed instead of flattened into a string, so `source()` and the
+    /// `anyhow`/`tracing` walks built on it reach the DNS, TLS or reset detail.
+    ///
+    /// ```
+    /// use letterxpress::{Error, TransportKind};
+    ///
+    /// let error = Error::Transport {
+    ///     kind: TransportKind::Connect,
+    ///     source: Box::new(std::io::Error::other("dns lookup failed")),
+    /// };
+    /// assert!(error.is_retryable(), "nothing was written");
+    /// assert!(std::error::Error::source(&error).is_some(), "the cause stays reachable");
+    /// ```
+    #[error("transport error ({kind}): {source}")]
     Transport {
         /// Failure class; decides whether a retry can duplicate a letter.
         kind: TransportKind,
-        /// Description from the transport.
-        message: String,
+        /// The transport's own error, with its cause chain intact.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
     /// A response body was not valid JSON.
@@ -430,8 +517,8 @@ pub enum Error {
     /// `serde_json` error has no slot for one. When the client decodes a
     /// response, a non-JSON body is `Json` only for a 2xx — a non-2xx with an
     /// unreadable body (a proxy's HTML page, say) is classified by its HTTP
-    /// status instead and reported as [`Error::Rejected`] or
-    /// [`Error::Upstream`], which do carry the code.
+    /// status instead and reported as [`Error::Rejected`], [`Error::RateLimited`]
+    /// or [`Error::Upstream`], which do carry the code.
     #[error("invalid JSON in response: {source}")]
     Json {
         /// The underlying `serde_json` error, with line and column.
@@ -453,12 +540,37 @@ pub enum Error {
     /// A response parsed as JSON but did not have the documented shape.
     ///
     /// On a submit (a `POST`) this is reported as [`Error::Ambiguous`] instead.
+    ///
+    /// `source` is the `serde_json` error that rejected the payload when the
+    /// envelope was JSON but its `data` could not be decoded into the
+    /// documented model. Keeping it typed lets a caller inspect the exact
+    /// failure — an unknown field, a wrong type, or a missing field — and
+    /// downcast it with [`std::error::Error::source`]. It is `None` when the
+    /// shape was rejected without a lower-level error, such as an unknown HTTP
+    /// status.
+    ///
+    /// ```
+    /// use letterxpress::Error;
+    ///
+    /// let source = serde_json::from_str::<u32>("\"not a number\"").unwrap_err();
+    /// let error = Error::UnexpectedShape {
+    ///     endpoint: "GET /v3/balance",
+    ///     message: source.to_string(),
+    ///     source: Some(Box::new(source)),
+    /// };
+    /// let source = std::error::Error::source(&error).expect("typed cause");
+    /// assert!(source.downcast_ref::<serde_json::Error>().is_some());
+    /// assert!(!error.is_retryable_for(true));
+    /// ```
     #[error("response for `{endpoint}` has an unexpected shape: {message}")]
     UnexpectedShape {
         /// The endpoint that was called.
         endpoint: &'static str,
         /// What was expected and what arrived.
         message: String,
+        /// The decoding failure that rejected the payload, when there was one.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
 
     /// A PDF or text field exceeds a documented size ceiling. Checked before
@@ -474,12 +586,29 @@ pub enum Error {
     },
 
     /// A base64 payload in a response could not be decoded.
-    #[error("invalid base64 in `{field}`: {message}")]
+    ///
+    /// `source` is the decoder's own [`base64::DecodeError`] — the invalid byte
+    /// and the offset, or the input length — kept typed instead of flattened
+    /// into a string.
+    ///
+    /// ```
+    /// use base64::DecodeError;
+    /// use letterxpress::Error;
+    ///
+    /// let error = Error::Base64 {
+    ///     field: "invoice.base64_data",
+    ///     source: DecodeError::InvalidByte(3, b'!'),
+    /// };
+    /// assert!(std::error::Error::source(&error).is_some(), "the cause stays reachable");
+    /// assert!(error.to_string().contains("offset 3"), "{error}");
+    /// ```
+    #[error("invalid base64 in `{field}`: {source}")]
     Base64 {
         /// Field that carried the payload.
         field: &'static str,
-        /// Decoder message.
-        message: String,
+        /// The decoder's error: which symbol, and where.
+        #[source]
+        source: base64::DecodeError,
     },
 
     /// The provider returned a CSV document that is not valid UTF-8.
@@ -491,11 +620,14 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether repeating the exact same request is safe and plausibly useful.
+    /// Whether a fresh attempt is safe even for a request that is **not**
+    /// idempotent — a submit, where a second attempt can bill twice.
     ///
-    /// `false` does not always mean "give up" — it means "a retry cannot be
-    /// automatic", because the outcome depends on state the client cannot see
-    /// (an [`Error::Upstream`] on a read, or an [`Error::Ambiguous`] submit).
+    /// This is the conservative half of the decision and exactly
+    /// [`Error::is_retryable_for`] with `false`: true for a rate limit and for
+    /// a connection that never reached the provider, false for everything
+    /// else, including failures that a read could retry. A caller that knows
+    /// its request is idempotent should pass that in instead.
     ///
     /// ```
     /// use letterxpress::{AmbiguousKind, Error, TransportKind};
@@ -507,15 +639,94 @@ impl Error {
     /// assert!(!ambiguous.is_retryable());
     /// assert!(ambiguous.is_ambiguous());
     ///
-    /// let reset = Error::Transport { kind: TransportKind::Io, message: "reset".into() };
-    /// assert!(reset.is_retryable());
+    /// let refused = Error::Transport {
+    ///     kind: TransportKind::Connect,
+    ///     source: Box::new(std::io::Error::other("dns")),
+    /// };
+    /// assert!(refused.is_retryable(), "nothing was written");
+    ///
+    /// let mid_flight = Error::Transport {
+    ///     kind: TransportKind::Io,
+    ///     source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    /// };
+    /// assert!(!mid_flight.is_retryable(), "a submit may already be billed");
     /// ```
     #[must_use]
     pub fn is_retryable(&self) -> bool {
+        self.is_retryable_for(false)
+    }
+
+    /// Whether repeating the exact same request is safe and plausibly useful,
+    /// given whether that request is idempotent.
+    ///
+    /// `idempotent` is [`Method::is_idempotent`](crate::Method::is_idempotent)
+    /// for the call that failed: `true` for `GET`, `PUT` and `DELETE`, `false`
+    /// for a submit. It matters for two failures — a 5xx answer and a
+    /// connection that broke mid-flight — because both may arrive after the
+    /// provider has acted on the request: a `GET` can repeat them, a submit
+    /// cannot without risking a second, billed letter.
+    ///
+    /// `false` does not always mean "give up" — it means "a retry cannot be
+    /// automatic", because the outcome depends on state the client cannot see
+    /// (an [`Error::Upstream`] on a submit, or any [`Error::Ambiguous`]). When
+    /// the answer is `true` but [`Error::retry_after`] has a value, the
+    /// provider asked to be left alone for that long first.
+    ///
+    /// ```
+    /// use letterxpress::{Error, Method, TransportKind};
+    ///
+    /// let upstream = Error::Upstream { status: 503, message: "unavailable".into() };
+    /// assert!(upstream.is_retryable_for(Method::Get.is_idempotent()));
+    /// assert!(!upstream.is_retryable_for(Method::Post.is_idempotent()));
+    ///
+    /// let reset = Error::Transport {
+    ///     kind: TransportKind::Io,
+    ///     source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    /// };
+    /// assert!(!reset.is_retryable(), "the context-free answer is the submit one");
+    /// assert!(reset.is_retryable_for(true), "a read can be repeated");
+    /// ```
+    #[must_use]
+    pub fn is_retryable_for(&self, idempotent: bool) -> bool {
         match self {
             Self::RateLimited { .. } => true,
-            Self::Transport { kind, .. } => kind.is_retryable(),
+            Self::Upstream { .. } => idempotent,
+            Self::Transport { kind, .. } => kind.is_retryable_for(idempotent),
             _ => false,
+        }
+    }
+
+    /// The delay the provider asked for before the next attempt, when it asked
+    /// for one.
+    ///
+    /// `Some` only on [`Error::RateLimited`] that carried a parseable
+    /// `Retry-After`; `None` on every other error, and on a rate limit without
+    /// that header. The crate invents no delay of its own, so `None` is not by
+    /// itself a licence to retry at once: decide with
+    /// [`Error::is_retryable_for`] first, and pick your own backoff when the
+    /// provider sent no hint.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use letterxpress::Error;
+    ///
+    /// let limited = Error::RateLimited { retry_after: Some(Duration::from_secs(30)) };
+    /// assert!(limited.is_retryable_for(true));
+    /// assert_eq!(limited.retry_after(), Some(Duration::from_secs(30)));
+    ///
+    /// let no_hint = Error::RateLimited { retry_after: None };
+    /// assert!(no_hint.is_retryable_for(true));
+    /// assert_eq!(no_hint.retry_after(), None, "no hint is not no wait");
+    ///
+    /// let gone = Error::NotFound { message: "gone".into() };
+    /// assert_eq!(gone.retry_after(), None);
+    /// ```
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after } => *retry_after,
+            _ => None,
         }
     }
 
@@ -631,17 +842,22 @@ mod tests {
         "Validation",
     ];
 
-    /// One row of the documented table: the label the table writes, its three
-    /// answer cells, and a sample of the variant the row classifies.
+    /// One row of the documented table: the label the table writes, its answer
+    /// cells, and a sample of the variant the row classifies.
+    #[allow(clippy::struct_excessive_bools)] // one bool per documentation column
     struct Row {
         /// First column, exactly as the table spells it.
         label: &'static str,
         /// `status()` column: `none`, `carried`, or the fixed code.
         status: &'static str,
-        /// `is_retryable()` column.
+        /// `is_retryable()` column: the answer for a submit.
         retryable: bool,
+        /// `is_retryable_for(true)` column: the answer for a read.
+        retryable_for_read: bool,
         /// `is_ambiguous()` column.
         ambiguous: bool,
+        /// `retry_after()` column: whether the provider's hint is carried.
+        retry_after: bool,
         /// A constructed value of the variant.
         error: Error,
     }
@@ -650,11 +866,13 @@ mod tests {
         /// The row as it must appear in the documentation, `///` included.
         fn documented(&self) -> String {
             format!(
-                "/// | {} | {} | {} | {} |",
+                "/// | {} | {} | {} | {} | {} | {} |",
                 self.label,
                 self.status,
                 yes_no(self.retryable),
-                yes_no(self.ambiguous)
+                yes_no(self.retryable_for_read),
+                yes_no(self.ambiguous),
+                yes_no(self.retry_after)
             )
         }
 
@@ -716,20 +934,48 @@ mod tests {
         }
     }
 
-    /// One documented row: label, the three answer cells, and a sample.
+    /// One documented row: label, the answer cells, and a sample.
+    #[allow(clippy::fn_params_excessive_bools)] // one per documented column
     fn row(
         label: &'static str,
         status: &'static str,
         retryable: bool,
+        retryable_for_read: bool,
         ambiguous: bool,
+        retry_after: bool,
         error: Error,
     ) -> Row {
         Row {
             label,
             status,
             retryable,
+            retryable_for_read,
             ambiguous,
+            retry_after,
             error,
+        }
+    }
+
+    /// A stand-in for whatever a real transport returned: a type with a
+    /// `Display` and an `Error` impl, so the samples below carry a typed cause
+    /// the way `reqwest` and a custom transport do.
+    #[derive(Debug)]
+    struct Cause(&'static str);
+
+    impl std::fmt::Display for Cause {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Cause {}
+
+    /// A `Transport` error whose cause says `text` — the shape the table rows
+    /// and the per-kind test build.
+    fn transport_error(kind: TransportKind, text: &'static str) -> Error {
+        Error::Transport {
+            kind,
+            source: Box::new(Cause(text)),
         }
     }
 
@@ -742,11 +988,15 @@ mod tests {
                 "none",
                 false,
                 false,
+                false,
+                false,
                 Error::invalid("letter.notice", "must not be empty"),
             ),
             row(
                 "[`Error::Unauthorized`]",
                 "401",
+                false,
+                false,
                 false,
                 false,
                 Error::Unauthorized {
@@ -758,6 +1008,8 @@ mod tests {
                 "403",
                 false,
                 false,
+                false,
+                false,
                 Error::Forbidden {
                     message: "Forbidden".into(),
                 },
@@ -765,6 +1017,8 @@ mod tests {
             row(
                 "[`Error::NotFound`]",
                 "404",
+                false,
+                false,
                 false,
                 false,
                 Error::NotFound {
@@ -776,6 +1030,8 @@ mod tests {
                 "405",
                 false,
                 false,
+                false,
+                false,
                 Error::MethodNotAllowed {
                     message: "Method Not Allowed".into(),
                 },
@@ -784,7 +1040,9 @@ mod tests {
                 "[`Error::RateLimited`]",
                 "429",
                 true,
+                true,
                 false,
+                true,
                 Error::RateLimited {
                     retry_after: Some(Duration::from_secs(30)),
                 },
@@ -792,6 +1050,8 @@ mod tests {
             row(
                 "[`Error::Rejected`]",
                 "carried",
+                false,
+                false,
                 false,
                 false,
                 Error::Rejected {
@@ -802,6 +1062,8 @@ mod tests {
             row(
                 "[`Error::Upstream`]",
                 "carried",
+                false,
+                true,
                 false,
                 false,
                 Error::Upstream {
@@ -814,6 +1076,8 @@ mod tests {
                 "carried",
                 false,
                 false,
+                false,
+                false,
                 Error::UnexpectedStatus {
                     status: 302,
                     endpoint: "GET /v3/balance",
@@ -824,7 +1088,9 @@ mod tests {
                 "[`Error::Ambiguous`] / `Timeout`",
                 "none",
                 false,
+                false,
                 true,
+                false,
                 Error::Ambiguous {
                     kind: AmbiguousKind::Timeout,
                     message: "timeout after 30s".into(),
@@ -834,7 +1100,9 @@ mod tests {
                 "[`Error::Ambiguous`] / `Io`",
                 "none",
                 false,
+                false,
                 true,
+                false,
                 Error::Ambiguous {
                     kind: AmbiguousKind::Io,
                     message: "connection reset".into(),
@@ -844,7 +1112,9 @@ mod tests {
                 "[`Error::Ambiguous`] / `Upstream`",
                 "carried",
                 false,
+                false,
                 true,
+                false,
                 Error::Ambiguous {
                     kind: AmbiguousKind::Upstream { status: 502 },
                     message: "provider answered http 502 after the submit".into(),
@@ -854,45 +1124,43 @@ mod tests {
                 "[`Error::Transport`] / `Connect`",
                 "none",
                 true,
+                true,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Connect,
-                    message: "dns".into(),
-                },
+                false,
+                transport_error(TransportKind::Connect, "dns"),
             ),
             row(
                 "[`Error::Transport`] / `Timeout`",
                 "none",
+                false,
                 true,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Timeout,
-                    message: "no answer".into(),
-                },
+                false,
+                transport_error(TransportKind::Timeout, "no answer"),
             ),
             row(
                 "[`Error::Transport`] / `Io`",
                 "none",
+                false,
                 true,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Io,
-                    message: "connection reset".into(),
-                },
+                false,
+                transport_error(TransportKind::Io, "connection reset"),
             ),
             row(
                 "[`Error::Transport`] / `Protocol`",
                 "none",
                 false,
                 false,
-                Error::Transport {
-                    kind: TransportKind::Protocol,
-                    message: "no scripted response".into(),
-                },
+                false,
+                false,
+                transport_error(TransportKind::Protocol, "no scripted response"),
             ),
             row(
                 "[`Error::Json`]",
                 "none",
+                false,
+                false,
                 false,
                 false,
                 Error::Json {
@@ -906,6 +1174,8 @@ mod tests {
                 "none",
                 false,
                 false,
+                false,
+                false,
                 Error::MissingField {
                     endpoint: "GET /v3/balance",
                     field: "data",
@@ -916,14 +1186,19 @@ mod tests {
                 "none",
                 false,
                 false,
+                false,
+                false,
                 Error::UnexpectedShape {
                     endpoint: "GET /v3/balance",
                     message: "expected an object, got an array".into(),
+                    source: None,
                 },
             ),
             row(
                 "[`Error::TooLarge`]",
                 "none",
+                false,
+                false,
                 false,
                 false,
                 Error::TooLarge {
@@ -937,14 +1212,18 @@ mod tests {
                 "none",
                 false,
                 false,
+                false,
+                false,
                 Error::Base64 {
                     field: "invoice.base64_data",
-                    message: "invalid symbol 33".into(),
+                    source: base64::DecodeError::InvalidByte(0, b'!'),
                 },
             ),
             row(
                 "[`Error::Utf8`]",
                 "none",
+                false,
+                false,
                 false,
                 false,
                 Error::Utf8 {
@@ -954,9 +1233,10 @@ mod tests {
         ]
     }
 
-    /// Each row is the answer the code gives, and the two invariants that make
-    /// the table worth having hold: nothing is both retryable and ambiguous,
-    /// and every variant renders a message.
+    /// Each row is the answer the code gives, and the invariants that make the
+    /// table worth having hold: nothing is both retryable and ambiguous in
+    /// either context, `retry_after()` is only ever set on a rate limit, and
+    /// every variant renders a message.
     #[test]
     fn every_row_matches_the_code() {
         for row in table() {
@@ -973,13 +1253,43 @@ mod tests {
                 "{name}: `is_retryable()` disagrees with the documented table"
             );
             assert_eq!(
+                row.error.is_retryable_for(false),
+                row.retryable,
+                "{name}: `is_retryable()` is the submit answer"
+            );
+            assert_eq!(
+                row.error.is_retryable_for(true),
+                row.retryable_for_read,
+                "{name}: `is_retryable_for(true)` disagrees with the documented table"
+            );
+            assert_eq!(
                 row.error.is_ambiguous(),
                 row.ambiguous,
                 "{name}: `is_ambiguous()` disagrees with the documented table"
             );
+            assert_eq!(
+                row.error.retry_after().is_some(),
+                row.retry_after,
+                "{name}: `retry_after()` disagrees with the documented table"
+            );
             assert!(
                 !(row.retryable && row.ambiguous),
                 "{name}: a request that may already have been processed is never retryable"
+            );
+            assert!(
+                !(row.retryable_for_read && row.ambiguous),
+                "{name}: a request that may already have been processed is never retryable, \
+                 not even for a read"
+            );
+            if row.retryable {
+                assert!(
+                    row.retryable_for_read,
+                    "{name}: an idempotent request is never worse off than a submit"
+                );
+            }
+            assert!(
+                !row.retry_after || matches!(&row.error, Error::RateLimited { .. }),
+                "{name}: only a rate limit carries the provider's hint"
             );
             assert!(!row.error.to_string().is_empty(), "{name}: empty Display");
         }
@@ -1087,12 +1397,19 @@ mod tests {
             assert_eq!(matching.len(), 1, "no single row spells `{label}`");
             let row = &matching[0];
 
-            let sample = Error::Transport {
-                kind: *kind,
-                message: "sample".into(),
-            };
+            let sample = transport_error(*kind, "sample");
             assert_eq!(sample.status(), documented_status(row), "`{label}`: status");
             assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
+            assert_eq!(
+                row.retryable_for_read,
+                sample.is_retryable_for(true),
+                "`{label}`: retry for a read"
+            );
+            assert_eq!(
+                row.retry_after,
+                sample.retry_after().is_some(),
+                "`{label}`: Retry-After hint"
+            );
             assert_eq!(row.ambiguous, sample.is_ambiguous(), "`{label}`: ambiguous");
             assert_eq!(
                 sample.to_string(),
@@ -1172,6 +1489,100 @@ mod tests {
         }
     }
 
+    /// Only the failures that may arrive after the provider acted depend on
+    /// the request: a 5xx answer, a timeout and a broken connection. Every
+    /// other row answers the same for a submit and for a read.
+    #[test]
+    fn only_a_5xx_and_a_mid_flight_failure_depend_on_the_context() {
+        let rows = table();
+        let differing: Vec<&Row> = rows
+            .iter()
+            .filter(|row| row.retryable != row.retryable_for_read)
+            .collect();
+
+        assert_eq!(
+            differing.len(),
+            3,
+            "exactly `Upstream` and the two mid-flight kinds differ: {:?}",
+            differing.iter().map(|row| row.label).collect::<Vec<_>>()
+        );
+        for row in &differing {
+            assert!(!row.retryable, "{}: a submit is refused", row.label);
+            assert!(row.retryable_for_read, "{}: a read is safe", row.label);
+            assert!(!row.ambiguous, "{}", row.label);
+        }
+        assert!(differing
+            .iter()
+            .any(|row| matches!(&row.error, Error::Upstream { .. })));
+        for kind in [TransportKind::Timeout, TransportKind::Io] {
+            assert!(differing.iter().any(|row| matches!(
+                &row.error,
+                Error::Transport { kind: actual, .. } if *actual == kind
+            )));
+        }
+    }
+
+    /// The reported read: a 5xx on a `GET` is retryable without a special
+    /// case, and stays terminal for a submit.
+    #[test]
+    fn a_read_5xx_is_retryable_without_a_special_case() {
+        for status in [500, 502, 503] {
+            let upstream = Error::Upstream {
+                status,
+                message: "unavailable".into(),
+            };
+            assert!(upstream.is_retryable_for(true), "{status}");
+            assert!(!upstream.is_retryable_for(false), "{status}");
+            assert!(!upstream.is_retryable(), "{status}");
+            assert!(!upstream.is_ambiguous(), "{status}");
+        }
+    }
+
+    /// A submit whose request never left the machine is retryable, and so is a
+    /// rate limit: the provider rejected those before acting.
+    #[test]
+    fn a_failure_that_cannot_have_been_billed_is_retryable_for_a_submit() {
+        for error in [
+            transport_error(TransportKind::Connect, "dns"),
+            Error::RateLimited { retry_after: None },
+        ] {
+            assert!(error.is_retryable_for(false), "{error:?}");
+            assert!(error.is_retryable_for(true), "{error:?}");
+            assert!(!error.is_ambiguous(), "{error:?}");
+        }
+    }
+
+    /// `retry_after()` reports what the provider said, at the boundary of the
+    /// hint itself: zero is a hint to retry at once, a missing header is "no
+    /// hint" rather than "no wait", and nothing else carries a delay.
+    #[test]
+    fn retry_after_is_the_providers_hint_at_both_ends() {
+        assert_eq!(
+            Error::RateLimited {
+                retry_after: Some(Duration::ZERO)
+            }
+            .retry_after(),
+            Some(Duration::ZERO),
+            "zero seconds is a hint to retry immediately"
+        );
+        assert_eq!(
+            Error::RateLimited {
+                retry_after: Some(Duration::from_secs(1))
+            }
+            .retry_after(),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            Error::RateLimited { retry_after: None }.retry_after(),
+            None,
+            "no hint is not no wait"
+        );
+        assert_eq!(
+            transport_error(TransportKind::Connect, "dns").retry_after(),
+            None
+        );
+    }
+
     /// The table is prose, so it too is asserted: every row above appears in
     /// the documentation exactly once, and the documentation has no row the
     /// table does not know. Editing one side alone fails here.
@@ -1196,6 +1607,98 @@ mod tests {
             rows.len(),
             "the documentation and `table()` disagree on the number of rows"
         );
+    }
+
+    /// The defect this test file documents against: `Transport` flattened its
+    /// cause into a `String`, so `source()` stopped at the variant and a caller
+    /// could not tell DNS from TLS from a reset. The chain now runs through the
+    /// variant, and it *ends* — the deepest link has no source of its own.
+    #[test]
+    fn a_transport_error_keeps_the_whole_cause_chain() {
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("unexpected eof while reading the TLS record")
+            }
+        }
+
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("handshake failed")
+            }
+        }
+
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = Error::Transport {
+            kind: TransportKind::Io,
+            source: Box::new(Outer(Inner)),
+        };
+
+        let Some(first) = std::error::Error::source(&error) else {
+            panic!("the transport cause must survive the variant");
+        };
+        assert_eq!(first.to_string(), "handshake failed");
+        let Some(second) = first.source() else {
+            panic!("the cause of the cause must survive too");
+        };
+        assert_eq!(
+            second.to_string(),
+            "unexpected eof while reading the TLS record"
+        );
+        assert!(
+            second.source().is_none(),
+            "the chain ends, it does not loop"
+        );
+
+        // `Display` names the kind and the cause, exactly once.
+        assert_eq!(error.to_string(), "transport error (io): handshake failed");
+        // A mid-flight failure is only retryable for a request that is
+        // idempotent; the conservative answer stays `false`.
+        assert!(!error.is_retryable());
+        assert!(error.is_retryable_for(true));
+        assert!(!error.is_ambiguous());
+        assert_eq!(error.status(), None);
+    }
+
+    /// `Base64` keeps the decoder's error, so a caller can tell an invalid
+    /// symbol from a truncated input instead of parsing a sentence.
+    #[test]
+    fn a_base64_error_keeps_the_decoder_error_typed() {
+        use base64::DecodeError;
+
+        let truncated = DecodeError::InvalidLastSymbol(7, b'A');
+        let error = Error::Base64 {
+            field: "journal.csv_base64",
+            source: truncated.clone(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!("invalid base64 in `journal.csv_base64`: {truncated}")
+        );
+        let Some(source) = std::error::Error::source(&error) else {
+            panic!("the decoder error must stay reachable");
+        };
+        match source.downcast_ref::<DecodeError>() {
+            Some(DecodeError::InvalidLastSymbol(index, byte)) => {
+                assert_eq!((*index, *byte), (7, b'A'));
+            }
+            other => panic!("the source must be the decoder error, got {other:?}"),
+        }
+        assert!(!error.is_retryable());
+        assert_eq!(error.status(), None);
     }
 
     /// `retry_suffix` is only ever empty when there is nothing to say, and a

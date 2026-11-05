@@ -7,7 +7,8 @@
 //!    that only reads the body cannot tell it apart from a malformed success.
 //! 2. Successful answers repeat the code in the body (`"status": 200`). When
 //!    both are present they agree; when only the body carries a 4xx/5xx code,
-//!    that code is honoured too.
+//!    that code is honoured too. A body-level 429 is the same rate-limit
+//!    signal as an HTTP 429, including the `Retry-After` hint.
 //!
 //! ```
 //! use letterxpress::transport::Response;
@@ -164,6 +165,10 @@ impl Envelope {
 /// let error = letterxpress::parse_envelope("POST /v3/printjobs", limited).unwrap_err();
 /// assert_eq!(error.status(), Some(429));
 ///
+/// let body_limited = Response::new(200, [("Retry-After".to_string(), "30".to_string())], br#"{"status":429,"message":"Too Many Requests"}"#.to_vec());
+/// let error = letterxpress::parse_envelope("POST /v3/printjobs", body_limited).unwrap_err();
+/// assert!(matches!(error, letterxpress::Error::RateLimited { retry_after: Some(delay) } if delay.as_secs() == 30));
+///
 /// let redirect = Response::new(302, std::iter::empty(), Vec::new());
 /// let error = letterxpress::parse_envelope("GET /v3/balance", redirect).unwrap_err();
 /// assert!(matches!(error, letterxpress::Error::UnexpectedStatus { status: 302, .. }));
@@ -188,7 +193,7 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
         return Err(error);
     }
     // A body-level 4xx/5xx code is honoured when the HTTP status said 2xx.
-    if let Some(error) = body_error(body_status, message.as_deref()) {
+    if let Some(error) = body_error(body_status, message.as_deref(), &response) {
         return Err(error);
     }
 
@@ -250,12 +255,14 @@ fn http_error(
         _ => Some(Error::UnexpectedShape {
             endpoint,
             message: format!("unexpected HTTP status {status}: {text}"),
+            source: None,
         }),
     }
 }
 
-/// Maps a body-level status when the HTTP status said 2xx.
-fn body_error(status: Option<u16>, message: Option<&str>) -> Option<Error> {
+/// Maps a body-level status when the HTTP status said 2xx, using the same
+/// `Retry-After` header as the HTTP-status path.
+fn body_error(status: Option<u16>, message: Option<&str>, response: &Response) -> Option<Error> {
     let status = status?;
     let text = message.unwrap_or_default().to_string();
     match status {
@@ -263,6 +270,9 @@ fn body_error(status: Option<u16>, message: Option<&str>) -> Option<Error> {
         403 => Some(Error::Forbidden { message: text }),
         404 => Some(Error::NotFound { message: text }),
         405 => Some(Error::MethodNotAllowed { message: text }),
+        429 => Some(Error::RateLimited {
+            retry_after: parse_retry_after(response),
+        }),
         500..=599 => Some(Error::Upstream {
             status,
             message: text,
@@ -378,10 +388,9 @@ pub(crate) fn decode_base64(field: &'static str, encoded: &str) -> Result<Vec<u8
             max: max_encoded,
         });
     }
-    let bytes = STANDARD.decode(trimmed).map_err(|error| Error::Base64 {
-        field,
-        message: error.to_string(),
-    })?;
+    let bytes = STANDARD
+        .decode(trimmed)
+        .map_err(|source| Error::Base64 { field, source })?;
     if bytes.len() > crate::MAX_PDF_BYTES {
         return Err(Error::TooLarge {
             field,
@@ -458,6 +467,10 @@ mod tests {
             assert_eq!(error.status(), Some(status));
             assert!(!error.is_ambiguous());
             assert!(!error.is_retryable());
+            assert!(
+                !error.is_retryable_for(true),
+                "{status}: a redirect is terminal even for a read"
+            );
             assert!(error.to_string().contains(&status.to_string()));
         }
 

@@ -13,7 +13,7 @@
 //! // Neither the key nor a fragment of it appears in the debug output.
 //! let debug = format!("{credentials:?}");
 //! assert!(!debug.contains("s3cret"));
-//! assert!(debug.contains("<redacted>"));
+//! assert!(debug.contains("***"));
 //! # Ok::<(), letterxpress::Error>(())
 //! ```
 
@@ -21,6 +21,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::Serialize;
+use vitaminc_protected::{Controlled, Protected};
 
 use crate::Error;
 
@@ -131,12 +132,25 @@ impl FromStr for Mode {
 /// use letterxpress::{Credentials, Mode};
 ///
 /// let credentials = Credentials::new("kunde", "abc", Mode::Test).unwrap();
-/// let _ = credentials.auth_json();
+/// let _ = credentials.expose_api_key();
 /// ```
-#[derive(Clone)]
+///
+/// Cloning makes an independent key copy in a zeroizing wrapper; neither copy
+/// is retained after drop.
+///
+/// ```
+/// use letterxpress::{Credentials, Mode};
+///
+/// let credentials = Credentials::new("kunde", "abc", Mode::Test)?;
+/// let clone = credentials.clone();
+/// assert_eq!(clone.username(), credentials.username());
+/// assert!(!format!("{clone:?}").contains("abc"));
+/// # Ok::<(), letterxpress::Error>(())
+/// ```
+#[derive(Debug, Clone)]
 pub struct Credentials {
     username: String,
-    apikey: String,
+    apikey: Protected<String>,
     mode: Mode,
 }
 
@@ -152,12 +166,13 @@ pub(crate) struct AuthPayload<'a> {
 }
 
 impl Credentials {
-    /// Builds credentials, rejecting empty or control-character values.
+    /// Builds credentials, rejecting empty or non-ASCII-printable values.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] when `username` or `apikey` is empty after
-    /// trimming, contains a control character, or exceeds the sanity bound.
+    /// trimming, contains anything other than ASCII graphic characters or
+    /// spaces, or exceeds the sanity bound.
     ///
     /// ```
     /// use letterxpress::{Credentials, Mode};
@@ -165,6 +180,8 @@ impl Credentials {
     /// let credentials = Credentials::new("kunde", "abc123", Mode::Live)?;
     /// assert_eq!(credentials.username(), "kunde");
     /// assert!(credentials.mode().is_billable());
+    /// assert!(Credentials::new("kunde\u{2028}name", "abc123", Mode::Live).is_err());
+    /// assert!(Credentials::new("kunde", "abc\u{202E}123", Mode::Live).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn new(
@@ -173,22 +190,24 @@ impl Credentials {
         mode: Mode,
     ) -> Result<Self, Error> {
         let username = username.into();
-        let apikey = apikey.into();
+        let mut apikey = Protected::new(apikey.into());
 
         let username = username.trim();
-        let apikey = apikey.trim();
+        trim_in_place(apikey.inner_mut());
 
         validate_token("credentials.username", username, MAX_USERNAME_LEN)?;
-        validate_token("credentials.apikey", apikey, MAX_APIKEY_LEN)?;
+        validate_token("credentials.apikey", apikey.risky_ref(), MAX_APIKEY_LEN)?;
 
         Ok(Self {
             username: username.to_owned(),
-            apikey: apikey.to_owned(),
+            apikey,
             mode,
         })
     }
 
-    /// The account name. Safe to log: it identifies the account, not the key.
+    /// The account name, restricted to ASCII graphic characters and spaces so
+    /// it is safe to log: it identifies the account, not the key, and cannot
+    /// inject line breaks, bidi controls, or zero-width characters.
     ///
     /// ```
     /// use letterxpress::{Credentials, Mode};
@@ -223,35 +242,47 @@ impl Credentials {
     pub(crate) fn auth_payload(&self) -> AuthPayload<'_> {
         AuthPayload {
             username: &self.username,
-            apikey: &self.apikey,
+            apikey: self.expose_api_key(),
             mode: self.mode.as_str(),
         }
     }
-}
 
-impl fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credentials")
-            .field("username", &self.username)
-            .field("apikey", &"<redacted>")
-            .field("mode", &self.mode)
-            .finish()
+    /// Explicit crate-private access to the secret.
+    ///
+    /// The wrapper deliberately has no public accessor, `Deref`, `Display`, or
+    /// secret-bearing `Debug` implementation.
+    pub(crate) fn expose_api_key(&self) -> &str {
+        self.apikey.risky_ref()
     }
 }
 
-/// Rejects empty, oversized, and control-character-bearing values.
+/// Trims in place so the caller-provided allocation becomes the protected one.
+fn trim_in_place(value: &mut String) {
+    let trimmed_len = value.trim().len();
+    let start = value.len() - value.trim_start().len();
+    value.drain(..start);
+    value.truncate(trimmed_len);
+}
+
+/// Rejects empty, oversized, and non-ASCII-printable values.
 fn validate_token(field: &'static str, value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::invalid(field, "must not be empty"));
     }
-    if value.chars().count() > max {
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_graphic() || character == ' ')
+    {
+        return Err(Error::invalid(
+            field,
+            "must contain only ASCII graphic characters or spaces",
+        ));
+    }
+    if value.len() > max {
         return Err(Error::invalid(
             field,
             format!("must be at most {max} characters"),
         ));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(Error::invalid(field, "must not contain control characters"));
     }
     Ok(())
 }
@@ -272,14 +303,55 @@ mod tests {
 
     #[test]
     fn token_validation_rejects_every_bad_shape() {
-        assert!(validate_token("field", "", 10).is_err());
-        assert!(validate_token("field", "abcdef", 3).is_err());
-        assert!(validate_token("field", "a\u{1}b", 10).is_err());
+        assert!(matches!(
+            validate_token("field", "", 10),
+            Err(Error::Validation { field: "field", .. })
+        ));
+        assert!(matches!(
+            validate_token("field", "abcdef", 3),
+            Err(Error::Validation { field: "field", .. })
+        ));
         assert!(validate_token("field", "abc", 3).is_ok());
-        assert!(
-            validate_token("field", "äöü", 3).is_ok(),
-            "three characters, six bytes"
-        );
+        assert!(validate_token("field", "abc def", 7).is_ok());
+        assert!(validate_token("field", "!\"#$%&'()*+,-./", 16).is_ok());
+    }
+
+    #[test]
+    fn token_validation_rejects_invisible_and_directional_characters() {
+        for value in [
+            "a\u{1}b",    // Cc: START OF HEADING
+            "a\tb",       // Cc: TAB
+            "a\u{200B}b", // Cf: ZERO WIDTH SPACE
+            "a\u{2028}b", // Zl: LINE SEPARATOR
+            "a\u{202E}b", // Cf: RIGHT-TO-LEFT OVERRIDE
+            "äöü",        // printable non-ASCII
+            "a\u{7F}b",   // Cc: DELETE
+        ] {
+            assert!(matches!(
+                validate_token("field", value, 10),
+                Err(Error::Validation { field: "field", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn credentials_reject_log_unsafe_username_and_api_key_characters() {
+        for value in ["us\u{2028}er", "us\u{202E}er", "us\u{200B}er"] {
+            assert!(matches!(
+                Credentials::new(value, "key", Mode::Test),
+                Err(Error::Validation {
+                    field: "credentials.username",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                Credentials::new("user", value, Mode::Test),
+                Err(Error::Validation {
+                    field: "credentials.apikey",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -287,8 +359,62 @@ mod tests {
         let credentials = Credentials::new("kunde", "secret-key", Mode::Test).expect("credentials");
         let debug = format!("{credentials:?}");
         assert!(debug.contains("kunde"));
-        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("***"));
         assert!(!debug.contains("secret-key"));
+        assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn clone_is_redacted_and_keeps_the_key_usable() {
+        let credentials = Credentials::new("kunde", "secret-key", Mode::Test).expect("credentials");
+        let clone = credentials.clone();
+        let debug = format!("{clone:?}");
+        assert!(!debug.contains("secret-key"));
+        assert!(matches!(
+            credentials.auth_payload(),
+            AuthPayload {
+                apikey: "secret-key",
+                ..
+            }
+        ));
+        assert!(matches!(
+            clone.auth_payload(),
+            AuthPayload {
+                apikey: "secret-key",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn api_key_is_stored_in_a_zeroizing_wrapper() {
+        let credentials = Credentials::new("kunde", "secret-key", Mode::Test).expect("credentials");
+        let protected: &Protected<String> = &credentials.apikey;
+        assert!(std::mem::needs_drop::<Protected<String>>());
+        assert_eq!(protected.risky_ref(), "secret-key");
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_secret_are_rejected_with_typed_errors() {
+        for secret in ["", " ", "\t", "\n"] {
+            assert!(matches!(
+                Credentials::new("kunde", secret, Mode::Test),
+                Err(Error::Validation {
+                    field: "credentials.apikey",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_from_the_protected_key() {
+        let credentials =
+            Credentials::new(" kunde ", "  secret-key  ", Mode::Test).expect("credentials");
+        assert_eq!(credentials.username(), "kunde");
+        assert_eq!(credentials.expose_api_key(), "secret-key");
+        let payload = serde_json::to_value(credentials.auth_payload()).expect("auth payload");
+        assert_eq!(payload["apikey"], "secret-key");
     }
 
     #[test]
