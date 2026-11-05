@@ -14,7 +14,7 @@
 //! use letterxpress::{Client, Credentials, Mode, PriceRequest, ReqwestTransport};
 //!
 //! let client = Client::new(
-//!     ReqwestTransport::new(),
+//!     ReqwestTransport::new()?,
 //!     Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
 //! );
 //!

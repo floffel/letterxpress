@@ -731,7 +731,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
 /// use letterxpress::{Client, Credentials, Mode, ReqwestTransport};
 ///
 /// let client = Client::new(
-///     ReqwestTransport::new(),
+///     ReqwestTransport::new()?,
 ///     Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
 /// );
 /// println!("balance: {} EUR", client.balance().await?.balance);
@@ -739,7 +739,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
 }
@@ -749,18 +749,24 @@ impl ReqwestTransport {
     /// Creates a transport with a default client (rustls, no redirects
     /// followed — a redirect would move the credential to another host).
     ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] with [`TransportKind::Protocol`] when the hardened
+    /// client cannot be built. It never falls back to a default client, which
+    /// would follow redirects and carry the credential-bearing body to another
+    /// host.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
-    /// let transport = letterxpress::ReqwestTransport::new();
+    /// # fn demo() -> letterxpress::Result<()> {
+    /// let transport = letterxpress::ReqwestTransport::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-        }
+    pub fn new() -> Result<Self> {
+        let client = build_reqwest_client(reqwest::Client::builder())
+            .map_err(|error| describe_reqwest_error(&error))?;
+        Ok(Self { client })
     }
 
     /// Reuses an existing `reqwest::Client` (for connection pooling with the
@@ -811,6 +817,15 @@ impl Transport for ReqwestTransport {
     }
 }
 
+/// Builds the hardened client the transport uses: the redirect policy is part
+/// of the builder, so the only successful construction path has it in place.
+#[cfg(feature = "http")]
+fn build_reqwest_client(
+    builder: reqwest::ClientBuilder,
+) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    builder.redirect(reqwest::redirect::Policy::none()).build()
+}
+
 #[cfg(feature = "http")]
 fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers
@@ -832,7 +847,7 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
         TransportKind::Timeout
     } else if error.is_connect() {
         TransportKind::Connect
-    } else if error.is_body() || error.is_decode() || error.is_request() {
+    } else if error.is_builder() || error.is_body() || error.is_decode() || error.is_request() {
         TransportKind::Protocol
     } else {
         TransportKind::Io
@@ -959,6 +974,19 @@ mod tests {
 
     #[cfg(feature = "http")]
     #[test]
+    fn reqwest_transport_new_builds_the_hardened_client() {
+        assert!(ReqwestTransport::new().is_ok());
+    }
+
+    /// Runs the same steps as [`ReqwestTransport::new`] with a caller-chosen
+    /// builder, so a failing builder is reachable from a test.
+    #[cfg(feature = "http")]
+    fn built_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
+        build_reqwest_client(builder).map_err(|error| describe_reqwest_error(&error))
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
     fn non_utf8_response_headers_are_dropped_not_emptied() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -970,6 +998,47 @@ mod tests {
         let response = Response::new(429, collect_response_headers(&headers), Vec::new());
         assert_eq!(response.header("retry-after"), None);
         assert_eq!(response.header("x-rate"), Some("9"));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_new_fails_closed_on_a_broken_builder() {
+        // No fallback client: the failure is reported, and it is terminal.
+        let outcome = built_client(reqwest::Client::builder().user_agent("letterxpress\u{7f}"));
+        assert!(
+            matches!(
+                &outcome,
+                Err(Error::Transport {
+                    kind: TransportKind::Protocol,
+                    ..
+                })
+            ),
+            "a builder failure must be a terminal protocol error, got {outcome:?}"
+        );
+        if let Err(error) = &outcome {
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_builder_accepts_a_tab_and_rejects_a_line_feed() {
+        // 0x09 (tab) is the last byte `http` accepts in a header value, 0x0A
+        // (LF) the next code point and the first one it rejects.
+        assert!(
+            built_client(reqwest::Client::builder().user_agent("letterxpress/0.1\u{9}")).is_ok()
+        );
+        let outside = built_client(reqwest::Client::builder().user_agent("letterxpress/0.1\n"));
+        assert!(
+            matches!(
+                &outside,
+                Err(Error::Transport {
+                    kind: TransportKind::Protocol,
+                    ..
+                })
+            ),
+            "the first illegal header byte must fail closed, got {outside:?}"
+        );
     }
 
     #[cfg(feature = "http")]

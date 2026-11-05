@@ -18,7 +18,7 @@
 //!
 //! // `Mode::Test` puts jobs in the Postbox: nothing is printed, nothing is billed.
 //! let client = Client::new(
-//!     letterxpress::ReqwestTransport::new(),
+//!     letterxpress::ReqwestTransport::new()?,
 //!     Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
 //! );
 //!
