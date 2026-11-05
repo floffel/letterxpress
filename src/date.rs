@@ -223,6 +223,16 @@ fn is_leap_year(year: u16) -> bool {
 mod tests {
     use super::*;
 
+    fn assert_validation_error(text: &str) {
+        assert!(
+            matches!(
+                Date::parse(text),
+                Err(Error::Validation { field: "date", .. })
+            ),
+            "expected a date validation error for {text:?}"
+        );
+    }
+
     #[test]
     fn unknown_months_have_no_length() {
         // `Date::new` rejects these before the table is consulted; the arm keeps
@@ -233,5 +243,53 @@ mod tests {
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2026, 4), 30);
         assert_eq!(days_in_month(2026, 12), 31);
+    }
+
+    #[test]
+    fn parse_accepts_the_calendar_boundaries() {
+        for text in [
+            "1970-01-01",
+            "2024-02-29",
+            "2026-01-31",
+            "2026-12-31",
+            "9999-12-31",
+        ] {
+            assert!(Date::parse(text).is_ok(), "expected {text:?} to parse");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_lengths_on_either_side_of_ten() {
+        for text in ["2026-10-2", "2026-10-240"] {
+            assert_validation_error(text);
+        }
+    }
+
+    #[test]
+    fn parse_rejects_years_outside_the_supported_range() {
+        for text in ["0000-01-01", "1969-12-31", "10000-01-01"] {
+            assert_validation_error(text);
+        }
+    }
+
+    #[test]
+    fn parse_rejects_impossible_calendar_fields() {
+        for text in [
+            "2023-02-29",
+            "2026-02-30",
+            "2026-00-10",
+            "2026-13-01",
+            "2026-04-31",
+            "2026-10-00",
+        ] {
+            assert_validation_error(text);
+        }
+    }
+
+    #[test]
+    fn parse_rejects_non_ascii_digits_before_slicing() {
+        for text in ["2026-10-é", "2026-10-2４"] {
+            assert_validation_error(text);
+        }
     }
 }

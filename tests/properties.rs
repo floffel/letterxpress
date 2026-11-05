@@ -17,6 +17,13 @@ use letterxpress::{
 };
 use proptest::prelude::*;
 
+fn valid_date() -> impl Strategy<Value = Date> {
+    (1970u16..=9999, 1u8..=12, 1u8..=31)
+        .prop_filter_map("a valid calendar date", |(year, month, day)| {
+            Date::new(year, month, day).ok()
+        })
+}
+
 /// One `Error` per public variant, with `text` in every prose slot and
 /// `status`/`kind` in the slots that decide the stance. Kept exhaustive by
 /// hand: a variant added to the enum has to be added here too, which is what
@@ -215,14 +222,19 @@ proptest! {
         prop_assert_eq!(JobStatus::from_wire(&padded), JobStatus::Done);
     }
 
-    /// A validated date always formats as `yyyy-mm-dd` and re-parses to itself.
+    /// Every validated date formats as `yyyy-mm-dd` and round-trips through the
+    /// parser, including the 29th to 31st and the final supported year.
     #[test]
-    fn date_round_trip(year in 1970u16..9999, month in 1u8..=12, day in 1u8..=28) {
-        let date = Date::new(year, month, day).expect("a day <= 28 always exists");
+    fn date_round_trip(date in valid_date()) {
         let text = date.to_string();
         prop_assert_eq!(text.len(), 10);
-        prop_assert_eq!(Date::parse(&text).expect("re-parse"), date);
-        prop_assert_eq!(date.days_since_epoch(), Date::parse(&text).expect("re-parse").days_since_epoch());
+        let parsed = Date::parse(&text);
+        prop_assert!(parsed.is_ok(), "re-parsing {text:?} failed: {parsed:?}");
+        prop_assert_eq!(parsed.ok(), Some(date));
+        prop_assert_eq!(
+            Date::parse(&text).ok().map(Date::days_since_epoch),
+            Some(date.days_since_epoch())
+        );
     }
 
     /// Ordering by day count agrees with ordering by fields.
