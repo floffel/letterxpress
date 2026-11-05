@@ -84,6 +84,8 @@
 //! * Credentials and API keys are redacted in `Debug` — [`Credentials`],
 //!   [`Client`] and [`Request`] print `<redacted>` or
 //!   only a body *length*.
+//! * The API key has no public accessor; it is serialized only by the private
+//!   request-body builder.
 //! * [`Credentials::new`] fails closed on empty, whitespace-only or
 //!   control-character values instead of sending a request the provider answers
 //!   with an indistinguishable 401.

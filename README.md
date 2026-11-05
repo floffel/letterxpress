@@ -157,6 +157,8 @@ stack, no async runtime, no socket. Bring your own `Transport` implementation
 - `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`.
 - The API key is redacted in `Debug` for `Credentials`, `Client` and
   `transport::Request` (which prints a body *length*, never the body).
+- The API key has no public accessor; it is serialized only by the private
+  request-body builder.
 - `Credentials::new` fails closed on empty, whitespace-only, control-character
   or over-long values instead of sending a request the provider answers with an
   indistinguishable 401.

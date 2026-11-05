@@ -20,6 +20,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::Serialize;
+
 use crate::Error;
 
 /// Longest accepted username; the provider documents no limit, this is a
@@ -122,11 +124,31 @@ impl FromStr for Mode {
 /// let ok = Credentials::new(" user ", "key", Mode::Test); // surrounding space is trimmed
 /// assert!(ok.is_ok());
 /// ```
+///
+/// The key is not exposed by a public accessor:
+///
+/// ```compile_fail
+/// use letterxpress::{Credentials, Mode};
+///
+/// let credentials = Credentials::new("kunde", "abc", Mode::Test).unwrap();
+/// let _ = credentials.auth_json();
+/// ```
 #[derive(Clone)]
 pub struct Credentials {
     username: String,
     apikey: String,
     mode: Mode,
+}
+
+/// The borrowed `auth` object serialized into every request body.
+///
+/// This stays crate-private and deliberately implements only [`Serialize`], so
+/// callers cannot format or reserialize the API key.
+#[derive(Serialize)]
+pub(crate) struct AuthPayload<'a> {
+    username: &'a str,
+    apikey: &'a str,
+    mode: &'static str,
 }
 
 impl Credentials {
@@ -193,24 +215,17 @@ impl Credentials {
         self.mode
     }
 
-    /// The `auth` object exactly as it goes on the wire.
+    /// Borrows the credentials as the `auth` object sent on the wire.
     ///
-    /// ```
-    /// use letterxpress::{Credentials, Mode};
-    ///
-    /// let credentials = Credentials::new("kunde", "abc", Mode::Test)?;
-    /// let auth = credentials.auth_json();
-    /// assert_eq!(auth["username"], "kunde");
-    /// assert_eq!(auth["mode"], "test");
-    /// # Ok::<(), letterxpress::Error>(())
-    /// ```
+    /// This is crate-private: the API key must only be serialized into a
+    /// request, never handed to callers as a `Debug` or `Serialize` value.
     #[must_use]
-    pub fn auth_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "username": self.username,
-            "apikey": self.apikey,
-            "mode": self.mode.as_str(),
-        })
+    pub(crate) fn auth_payload(&self) -> AuthPayload<'_> {
+        AuthPayload {
+            username: &self.username,
+            apikey: &self.apikey,
+            mode: self.mode.as_str(),
+        }
     }
 }
 
@@ -274,5 +289,35 @@ mod tests {
         assert!(debug.contains("kunde"));
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-key"));
+    }
+
+    #[test]
+    fn auth_payload_serializes_the_documented_shape() {
+        let credentials = Credentials::new("kunde", "secret-key", Mode::Live).expect("credentials");
+        let payload = serde_json::to_value(credentials.auth_payload()).expect("auth payload");
+        assert_eq!(payload["username"], "kunde");
+        assert_eq!(payload["apikey"], "secret-key");
+        assert_eq!(payload["mode"], "live");
+    }
+
+    #[test]
+    fn credential_length_limits_accept_exact_and_reject_one_past() {
+        assert!(Credentials::new("u".repeat(MAX_USERNAME_LEN), "k", Mode::Test).is_ok());
+        assert!(matches!(
+            Credentials::new("u".repeat(MAX_USERNAME_LEN + 1), "k", Mode::Test),
+            Err(Error::Validation {
+                field: "credentials.username",
+                ..
+            })
+        ));
+
+        assert!(Credentials::new("u", "k".repeat(MAX_APIKEY_LEN), Mode::Test).is_ok());
+        assert!(matches!(
+            Credentials::new("u", "k".repeat(MAX_APIKEY_LEN + 1), Mode::Test),
+            Err(Error::Validation {
+                field: "credentials.apikey",
+                ..
+            })
+        ));
     }
 }
