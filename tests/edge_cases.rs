@@ -1038,6 +1038,50 @@ fn journal_search_and_range_are_validated() {
 }
 
 #[test]
+fn a_page_total_is_bounded_at_the_decode_boundary() {
+    // Inside: the documented ceiling decodes, along with its string and float
+    // spellings, `null` and an absent field.
+    let at_limit: PrintJob = serde_json::from_str(
+        r#"{"id":1,"items":[{"pages":"10000"},{"pages":2.0},{"pages":null},{}]}"#,
+    )
+    .expect("documented page counts decode");
+    assert_eq!(at_limit.pages(), 10_002);
+
+    // One page above the ceiling, a whole u32, a negative count or a token that
+    // is not a count at all: refused, never truncated into a smaller total.
+    for body in [
+        r#"{"id":1,"items":[{"pages":10001}]}"#,
+        r#"{"id":1,"items":[{"pages":4294967295}]}"#,
+        r#"{"id":1,"items":[{"pages":-1}]}"#,
+        r#"{"id":1,"items":[{"pages":"x"}]}"#,
+    ] {
+        assert!(serde_json::from_str::<PrintJob>(body).is_err(), "{body}");
+    }
+}
+
+#[test]
+fn a_hand_built_page_total_saturates_instead_of_wrapping() {
+    let job = PrintJob {
+        items: vec![
+            letterxpress::PrintItem {
+                pages: u32::MAX - 1,
+                ..letterxpress::PrintItem::default()
+            },
+            letterxpress::PrintItem {
+                pages: 10,
+                ..letterxpress::PrintItem::default()
+            },
+        ],
+        ..PrintJob::default()
+    };
+    assert_eq!(
+        job.pages(),
+        u32::MAX,
+        "saturated: no wrap to 8 and no panic in a debug build"
+    );
+}
+
+#[test]
 fn money_helpers_are_stable_at_the_boundaries() {
     assert_eq!(Money::from_cents(0).cents(), 0);
     assert_eq!(Money::from_cents(-1).cents(), -1);

@@ -166,6 +166,31 @@ proptest! {
         let _ = letterxpress::EmailJobSubmission::parse(value);
     }
 
+    /// `PrintJob::pages` is a saturating sum: no list of provider counts wraps
+    /// to a smaller number, and no value panics — the failure the audit found
+    /// was a debug-build panic and a release-build wrap to a tiny total.
+    #[test]
+    fn the_page_total_is_a_saturating_sum(
+        pages in proptest::collection::vec(any::<u32>(), 0..8)
+    ) {
+        let job = letterxpress::PrintJob {
+            items: pages
+                .iter()
+                .map(|pages| letterxpress::PrintItem {
+                    pages: *pages,
+                    ..letterxpress::PrintItem::default()
+                })
+                .collect(),
+            ..letterxpress::PrintJob::default()
+        };
+        let expected = pages
+            .iter()
+            .map(|pages| u64::from(*pages))
+            .sum::<u64>()
+            .min(u64::from(u32::MAX));
+        prop_assert_eq!(u64::from(job.pages()), expected, "{:?}", pages);
+    }
+
     /// A flag means the same thing as a number and as its decimal string, and
     /// zero is the only `false` — the rule that used to hold for numbers only.
     #[test]
