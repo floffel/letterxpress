@@ -45,6 +45,8 @@ use crate::{Error, Result};
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Envelope {
+    /// The HTTP status line the answer arrived with.
+    pub(crate) http_status: u16,
     /// `status` from the body, when present.
     pub(crate) status: Option<u16>,
     /// `message` rendered as text, when present.
@@ -197,6 +199,7 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
 
     let body = body.unwrap_or(Value::Null);
     Ok(Envelope {
+        http_status,
         status: body_status,
         message,
         data: body.get("data").filter(|value| !value.is_null()).cloned(),

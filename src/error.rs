@@ -138,6 +138,87 @@ impl std::fmt::Display for TransportKind {
     }
 }
 
+/// Why a non-idempotent request left an unknown outcome.
+///
+/// Everything a reconciliation needs is here, so it never has to search the
+/// message: whether anything was written at all, and — when the provider did
+/// answer — which HTTP status it answered with.
+///
+/// ```
+/// use letterxpress::AmbiguousKind;
+///
+/// assert_eq!(AmbiguousKind::Timeout.status(), None);
+/// assert_eq!(AmbiguousKind::Io.status(), None);
+///
+/// let upstream = AmbiguousKind::Upstream { status: 503 };
+/// assert_eq!(upstream.status(), Some(503));
+/// assert_eq!(upstream.to_string(), "upstream 503");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AmbiguousKind {
+    /// The request was written, but no answer arrived in time.
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Timeout.status(), None);
+    /// ```
+    Timeout,
+    /// The connection broke mid-flight (reset, truncated body, TLS alert).
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Io.status(), None);
+    /// ```
+    Io,
+    /// The provider answered with an HTTP status that does not settle the
+    /// outcome: a 5xx (it may have created the job before failing), a 1xx/3xx
+    /// that was not followed, or a 2xx whose body did not decode (the job
+    /// exists, its tracking data does not).
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Upstream { status: 500 }.status(), Some(500));
+    /// ```
+    Upstream {
+        /// The HTTP status the provider answered with, or the body-level
+        /// status when the HTTP status itself was 2xx.
+        status: u16,
+    },
+}
+
+impl AmbiguousKind {
+    /// The HTTP status this kind carries, when the provider answered at all.
+    ///
+    /// ```
+    /// use letterxpress::AmbiguousKind;
+    ///
+    /// assert_eq!(AmbiguousKind::Timeout.status(), None);
+    /// assert_eq!(AmbiguousKind::Io.status(), None);
+    /// assert_eq!(AmbiguousKind::Upstream { status: 502 }.status(), Some(502));
+    /// ```
+    #[must_use]
+    pub fn status(self) -> Option<u16> {
+        match self {
+            Self::Timeout | Self::Io => None,
+            Self::Upstream { status } => Some(status),
+        }
+    }
+}
+
+impl std::fmt::Display for AmbiguousKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("timeout"),
+            Self::Io => f.write_str("io"),
+            Self::Upstream { status } => write!(f, "upstream {status}"),
+        }
+    }
+}
+
 /// The longest wait this crate will report for a provider `Retry-After`.
 ///
 /// The documented limit is 120 requests per minute
@@ -183,8 +264,9 @@ pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
 ///
 /// # Retry stance per variant
 ///
-/// One row per variant; [`Error::Transport`] is split by [`TransportKind`]
-/// because the kind is what decides. This table *is* the contract:
+/// One row per variant; [`Error::Transport`] is split by [`TransportKind`] and
+/// [`Error::Ambiguous`] by [`AmbiguousKind`], because in both cases the kind is
+/// what decides. This table *is* the contract:
 /// [`Error::status`], [`Error::is_retryable`], [`Error::is_retryable_for`],
 /// [`Error::is_ambiguous`] and [`Error::retry_after`] answer for every variant
 /// exactly as listed, and the test module at the end of this file asserts the
@@ -210,7 +292,9 @@ pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
 /// | [`Error::Rejected`] | carried | no | no | no | no |
 /// | [`Error::Upstream`] | carried | no | yes | no | no |
 /// | [`Error::UnexpectedStatus`] | carried | no | no | no | no |
-/// | [`Error::Ambiguous`] | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Timeout` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Io` | none | no | no | yes | no |
+/// | [`Error::Ambiguous`] / `Upstream` | carried | no | no | yes | no |
 /// | [`Error::Transport`] / `Connect` | none | yes | yes | no | no |
 /// | [`Error::Transport`] / `Timeout` | none | no | yes | no | no |
 /// | [`Error::Transport`] / `Io` | none | no | yes | no | no |
@@ -245,7 +329,10 @@ pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
 /// * `Ambiguous` — the provider may already have acted on the request. A retry
 ///   can produce a second, billed letter, so reconcile first; this is the only
 ///   variant for which `is_ambiguous()` is true, and no context makes it
-///   retryable.
+///   retryable. Its [`kind`](Error::Ambiguous::kind) says what was observed:
+///   `Timeout` and `Io` mean no usable answer arrived, `Upstream { status }`
+///   means the provider answered and that code is what [`Error::status`]
+///   returns.
 /// * `Transport` — a connection that was never established (`Connect`) cannot
 ///   have submitted a letter, so it is retryable in both contexts. `Timeout`
 ///   and `Io` may have delivered the request: retryable for a read only. The
@@ -412,16 +499,35 @@ pub enum Error {
     /// `notice` you set on the letter, or via the returned tracking data — and
     /// only submit again if it is absent.
     ///
-    /// ```
-    /// use letterxpress::Error;
+    /// [`kind`](Error::Ambiguous::kind) says what was observed, so the
+    /// reconciliation, the log line and an alerting rule can be driven by data
+    /// rather than by the prose in `message`: a timeout means no answer
+    /// arrived, `Upstream { status }` means one did and [`Error::status`]
+    /// reports that code.
     ///
-    /// let error = Error::Ambiguous { message: "timeout after 30s".into() };
-    /// assert!(error.is_ambiguous());
-    /// assert!(!error.is_retryable());
     /// ```
-    #[error("request may have been processed: {message}")]
+    /// use letterxpress::{AmbiguousKind, Error};
+    ///
+    /// let timeout = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Timeout,
+    ///     message: "timeout after 30s".into(),
+    /// };
+    /// assert!(timeout.is_ambiguous());
+    /// assert!(!timeout.is_retryable());
+    /// assert_eq!(timeout.status(), None);
+    ///
+    /// let upstream = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Upstream { status: 503 },
+    ///     message: "provider answered http 503 after the submit".into(),
+    /// };
+    /// assert_eq!(upstream.status(), Some(503));
+    /// ```
+    #[error("request may have been processed ({kind}): {message}")]
     Ambiguous {
-        /// What was observed, for logs and for the reconciliation decision.
+        /// What was observed: the failure class, and the HTTP status when the
+        /// provider answered.
+        kind: AmbiguousKind,
+        /// What was observed, in prose, for logs.
         message: String,
     },
 
@@ -574,9 +680,12 @@ impl Error {
     /// its request is idempotent should pass that in instead.
     ///
     /// ```
-    /// use letterxpress::{Error, TransportKind};
+    /// use letterxpress::{AmbiguousKind, Error, TransportKind};
     ///
-    /// let ambiguous = Error::Ambiguous { message: "timeout after 30s".into() };
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Timeout,
+    ///     message: "timeout after 30s".into(),
+    /// };
     /// assert!(!ambiguous.is_retryable());
     /// assert!(ambiguous.is_ambiguous());
     ///
@@ -685,9 +794,13 @@ impl Error {
     /// Whether the provider may already have acted on this request.
     ///
     /// ```
-    /// use letterxpress::Error;
+    /// use letterxpress::{AmbiguousKind, Error};
     ///
-    /// assert!(Error::Ambiguous { message: "timeout".into() }.is_ambiguous());
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Io,
+    ///     message: "connection reset".into(),
+    /// };
+    /// assert!(ambiguous.is_ambiguous());
     /// assert!(!Error::NotFound { message: "gone".into() }.is_ambiguous());
     /// ```
     #[must_use]
@@ -697,8 +810,13 @@ impl Error {
 
     /// The HTTP status this error carries, when there was one.
     ///
+    /// An [`Error::Ambiguous`] carries the provider's code when its
+    /// [`kind`](Error::Ambiguous::kind) is [`AmbiguousKind::Upstream`], which is
+    /// exactly the case a reconciliation has to look up; a timeout or a
+    /// mid-flight failure has no status to report.
+    ///
     /// ```
-    /// use letterxpress::Error;
+    /// use letterxpress::{AmbiguousKind, Error};
     ///
     /// let err = Error::Unauthorized { message: "Unauthorized.".into() };
     /// assert_eq!(err.status(), Some(401));
@@ -709,6 +827,12 @@ impl Error {
     ///     message: String::new(),
     /// };
     /// assert_eq!(redirect.status(), Some(302));
+    ///
+    /// let ambiguous = Error::Ambiguous {
+    ///     kind: AmbiguousKind::Upstream { status: 500 },
+    ///     message: "provider answered http 500 after the submit".into(),
+    /// };
+    /// assert_eq!(ambiguous.status(), Some(500));
     /// ```
     #[must_use]
     pub fn status(&self) -> Option<u16> {
@@ -721,6 +845,7 @@ impl Error {
             Self::Rejected { status, .. }
             | Self::Upstream { status, .. }
             | Self::UnexpectedStatus { status, .. } => Some(*status),
+            Self::Ambiguous { kind, .. } => kind.status(),
             _ => None,
         }
     }
@@ -879,6 +1004,7 @@ mod tests {
                 Error::Rejected { status, .. }
                 | Error::Upstream { status, .. }
                 | Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::Ambiguous { kind, .. } => kind.status(),
                 _ => None,
             },
             fixed => fixed.parse::<u16>().ok(),
@@ -1036,14 +1162,39 @@ mod tests {
                 },
             ),
             row(
-                "[`Error::Ambiguous`]",
+                "[`Error::Ambiguous`] / `Timeout`",
                 "none",
                 false,
                 false,
                 true,
                 false,
                 Error::Ambiguous {
+                    kind: AmbiguousKind::Timeout,
                     message: "timeout after 30s".into(),
+                },
+            ),
+            row(
+                "[`Error::Ambiguous`] / `Io`",
+                "none",
+                false,
+                false,
+                true,
+                false,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Io,
+                    message: "connection reset".into(),
+                },
+            ),
+            row(
+                "[`Error::Ambiguous`] / `Upstream`",
+                "carried",
+                false,
+                false,
+                true,
+                false,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: 502 },
+                    message: "provider answered http 502 after the submit".into(),
                 },
             ),
             row(
@@ -1239,8 +1390,13 @@ mod tests {
                         Error::Rejected { .. }
                             | Error::Upstream { .. }
                             | Error::UnexpectedStatus { .. }
+                            | Error::Ambiguous {
+                                kind: AmbiguousKind::Upstream { .. },
+                                ..
+                            }
                     ),
-                    "`{}`: only `Rejected`, `Upstream` and `UnexpectedStatus` carry a status",
+                    "`{}`: only `Rejected`, `Upstream`, `UnexpectedStatus` and \
+                     `Ambiguous`/`Upstream` carry a status",
                     row.label
                 );
             }
@@ -1265,8 +1421,8 @@ mod tests {
         assert_eq!(labels.len(), rows.len(), "two rows share a label");
         assert_eq!(
             rows.len(),
-            VARIANTS.len() + 3,
-            "the four `Transport` kinds are the only repeated variant"
+            VARIANTS.len() + 5,
+            "the four `Transport` kinds and the three `Ambiguous` kinds are the only repeats"
         );
     }
 
@@ -1341,6 +1497,71 @@ mod tests {
                 kind.to_string(),
                 kind_name(*kind).to_ascii_lowercase(),
                 "`{label}`: `Display` spells the kind the way the row does"
+            );
+        }
+    }
+
+    /// Every [`AmbiguousKind`], listed so that a new kind cannot stay out of
+    /// the documented table: [`ambiguous_kind_name`] matches without a wildcard
+    /// arm, so the build breaks first.
+    const AMBIGUOUS_KINDS: &[AmbiguousKind] = &[
+        AmbiguousKind::Timeout,
+        AmbiguousKind::Io,
+        AmbiguousKind::Upstream { status: 502 },
+    ];
+
+    /// The `AmbiguousKind` name the table's second column spells, matched with
+    /// **no** wildcard arm.
+    fn ambiguous_kind_name(kind: AmbiguousKind) -> &'static str {
+        match kind {
+            AmbiguousKind::Timeout => "Timeout",
+            AmbiguousKind::Io => "Io",
+            AmbiguousKind::Upstream { .. } => "Upstream",
+        }
+    }
+
+    /// The three `Ambiguous` rows are one per kind, labelled exactly as the
+    /// table spells them, and each one answers with the kind's own status.
+    /// `AmbiguousKind` is `#[non_exhaustive]` as well, so this is the check
+    /// that would catch a kind added without a row.
+    #[test]
+    fn every_ambiguous_kind_has_exactly_one_documented_row() {
+        let rows = table();
+        let ambiguous: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(&row.error, Error::Ambiguous { .. }))
+            .collect();
+        assert_eq!(
+            ambiguous.len(),
+            AMBIGUOUS_KINDS.len(),
+            "one `Ambiguous` row per kind, and no kind twice"
+        );
+
+        for kind in AMBIGUOUS_KINDS {
+            let label = format!("[`Error::Ambiguous`] / `{}`", ambiguous_kind_name(*kind));
+            let matching: Vec<&Row> = ambiguous
+                .iter()
+                .copied()
+                .filter(|row| row.label == label)
+                .collect();
+            assert_eq!(matching.len(), 1, "no single row spells `{label}`");
+            let row = &matching[0];
+
+            let sample = Error::Ambiguous {
+                kind: *kind,
+                message: "sample".into(),
+            };
+            assert_eq!(
+                documented_status(row),
+                kind.status(),
+                "`{label}`: the row and its kind disagree on the status"
+            );
+            assert_eq!(sample.status(), kind.status(), "`{label}`: status");
+            assert_eq!(row.retryable, sample.is_retryable(), "`{label}`: retry");
+            assert_eq!(row.ambiguous, sample.is_ambiguous(), "`{label}`: ambiguous");
+            assert!(
+                sample.to_string().contains(&kind.to_string()),
+                "`{label}`: `Display` names the kind the table names"
             );
         }
     }

@@ -35,10 +35,10 @@ use crate::letter::validate_email;
 use crate::response::{parse_envelope, Envelope};
 use crate::transport::{Method, Request, Transport};
 use crate::{
-    Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage, EmailJobSubmission,
-    InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal, JournalType, Letter, Mode,
-    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Specification, TransactionFilter,
-    TransactionPage, TransportKind,
+    AmbiguousKind, Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage,
+    EmailJobSubmission, InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal,
+    JournalType, Letter, Mode, Price, PriceRequest, PrintJob, PrintJobPage, Registered,
+    Specification, TransactionFilter, TransactionPage, TransportKind,
 };
 use crate::{Error, Result};
 
@@ -1137,11 +1137,12 @@ impl<T: Transport> Client<T> {
         // The job is created and billed before the body is decoded, so an
         // unreadable answer is an unknown outcome, not a shape error.
         let endpoint = "POST /v3/emailjobs";
+        let http_status = envelope.http_status;
         let data = envelope
             .require_data(endpoint)
-            .map_err(promote_to_ambiguous)?;
+            .map_err(|error| promote_to_ambiguous(error, http_status))?;
         EmailJobSubmission::parse(data)
-            .map_err(|source| promote_to_ambiguous(unexpected_shape(endpoint, source)))
+            .map_err(|source| promote_to_ambiguous(unexpected_shape(endpoint, source), http_status))
     }
 
     /// `GET /v3/emailjobs` — one page of e-mail jobs.
@@ -1418,9 +1419,10 @@ impl<T: Transport> Client<T> {
             Ok(response) => response,
             Err(error) => return Err(classify_transport(error, method)),
         };
+        let http_status = response.status();
         let decoded = parse_envelope(endpoint, response);
         match decoded {
-            Err(error) if !method.is_idempotent() => Err(promote_to_ambiguous(error)),
+            Err(error) if !method.is_idempotent() => Err(promote_to_ambiguous(error, http_status)),
             other => other,
         }
     }
@@ -1450,16 +1452,25 @@ fn endpoint_label(method: Method, path: &str) -> &'static str {
 }
 
 /// Turns a dead transport into the right error: a submit that timed out *after*
-/// being written may already exist.
+/// being written may already exist, and the structured [`AmbiguousKind`] says
+/// which of the two transport failures it was.
 fn classify_transport(error: Error, method: Method) -> Error {
     if method.is_idempotent() {
         return error;
     }
     match &error {
         Error::Transport {
-            kind: TransportKind::Timeout | TransportKind::Io,
+            kind: TransportKind::Timeout,
             source,
         } => Error::Ambiguous {
+            kind: AmbiguousKind::Timeout,
+            message: format!("{method} may have been processed: {source}"),
+        },
+        Error::Transport {
+            kind: TransportKind::Io,
+            source,
+        } => Error::Ambiguous {
+            kind: AmbiguousKind::Io,
             message: format!("{method} may have been processed: {source}"),
         },
         _ => error,
@@ -1469,9 +1480,14 @@ fn classify_transport(error: Error, method: Method) -> Error {
 /// A failed submit is ambiguous even when the failure is on our side: a 5xx, a
 /// 1xx/3xx answer, or a 2xx whose body does not decode leaves the job possibly
 /// created and billed. Definitive answers (4xx, auth, rate limit) stay terminal.
-fn promote_to_ambiguous(error: Error) -> Error {
+///
+/// `http_status` is the status of the response that produced `error`, so the
+/// 2xx-with-an-unreadable-body case can still report its code through
+/// [`Error::status`] instead of burying it in the message.
+fn promote_to_ambiguous(error: Error, http_status: u16) -> Error {
     match error {
         Error::Upstream { status, message } => Error::Ambiguous {
+            kind: AmbiguousKind::Upstream { status },
             message: format!("provider answered http {status} after the submit: {message}"),
         },
         Error::UnexpectedStatus {
@@ -1479,21 +1495,31 @@ fn promote_to_ambiguous(error: Error) -> Error {
             endpoint,
             message,
         } => Error::Ambiguous {
+            kind: AmbiguousKind::Upstream { status },
             message: format!(
                 "provider answered http {status} for `{endpoint}` after the submit; the job may exist: {message}"
             ),
         },
         Error::Json { source } => Error::Ambiguous {
+            kind: AmbiguousKind::Upstream {
+                status: http_status,
+            },
             message: format!("provider answered 2xx with a body that is not JSON: {source}"),
         },
         Error::MissingField { field, .. } => Error::Ambiguous {
+            kind: AmbiguousKind::Upstream {
+                status: http_status,
+            },
             message: format!("provider answered 2xx without `{field}`: the job may exist"),
         },
         Error::UnexpectedShape {
             endpoint, message, ..
         } => Error::Ambiguous {
+            kind: AmbiguousKind::Upstream {
+                status: http_status,
+            },
             message: format!(
-                "provider answered 2xx for `{endpoint}` with an undecodable body: {message}"
+                "provider answered http {http_status} for `{endpoint}` with an undecodable body: {message}"
             ),
         },
         other => other,
@@ -1522,7 +1548,8 @@ fn decode_data<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) 
 /// `data`, or a shape the client does not know — leaves the outcome unknown, so
 /// it is promoted to [`Error::Ambiguous`] instead of a terminal shape error.
 fn decode_submitted<D: DeserializeOwned>(endpoint: &'static str, envelope: Envelope) -> Result<D> {
-    decode_data(endpoint, envelope).map_err(promote_to_ambiguous)
+    let http_status = envelope.http_status;
+    decode_data(endpoint, envelope).map_err(|error| promote_to_ambiguous(error, http_status))
 }
 
 #[cfg(test)]

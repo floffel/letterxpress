@@ -107,10 +107,31 @@
 //!
 //! Submitting a letter is **at-most-once as far as this crate is concerned**:
 //! it sends the request once and reports [`Error::Ambiguous`] when the outcome
-//! is unknowable. The provider offers no idempotency key, so exactly-once is
-//! only reachable by reconciling: set a unique [`Letter::with_notice`] value,
-//! then on [`Error::Ambiguous`] list [`Client::print_jobs`] and look for it
-//! before submitting again.
+//! is unknowable. That error carries an [`AmbiguousKind`] — `Timeout`, `Io`, or
+//! `Upstream { status }` — and [`Error::status`] returns the numeric HTTP status
+//! for the last of those, so reconciliation, logging and alerting can branch on
+//! data instead of the message. The provider offers no idempotency key, so
+//! exactly-once is only reachable by reconciling: set a unique
+//! [`Letter::with_notice`] value, then on [`Error::Ambiguous`] list
+//! [`Client::print_jobs`] and look for it before submitting again.
+//!
+//! ```
+//! use letterxpress::{AmbiguousKind, Error};
+//!
+//! let error = Error::Ambiguous {
+//!     kind: AmbiguousKind::Upstream { status: 503 },
+//!     message: "provider answered http 503 after the submit".into(),
+//! };
+//! let observed = match &error {
+//!     Error::Ambiguous {
+//!         kind: AmbiguousKind::Upstream { status },
+//!         ..
+//!     } => Some(*status),
+//!     _ => None,
+//! };
+//! assert_eq!(observed, Some(503));
+//! assert_eq!(error.status(), observed);
+//! ```
 //!
 //! # Contract verification
 //!
@@ -140,7 +161,7 @@ pub use client::{
 };
 pub use credentials::{Credentials, Mode};
 pub use date::Date;
-pub use error::{Error, TransportKind, MAX_RETRY_AFTER};
+pub use error::{AmbiguousKind, Error, TransportKind, MAX_RETRY_AFTER};
 pub use job::{
     Balance, Deletion, EmailJob, EmailJobPage, EmailJobSubmission, Invoice, InvoiceDocument,
     InvoiceId, InvoicePage, JobId, Journal, Pagination, Price, PriceEcho, PrintItem, PrintJob,
