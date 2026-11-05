@@ -10,8 +10,8 @@ mod common;
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    Color, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode, Registered,
-    Shipping, TransportKind, MAX_NOTICE_CHARS,
+    AmbiguousKind, Color, Date, EmailOption, Error, JobStatus, Letter, Mode, Money, PrintMode,
+    Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
 };
 use proptest::prelude::*;
 
@@ -56,6 +56,7 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
             message: text.into(),
         },
         Error::Ambiguous {
+            kind: AmbiguousKind::Upstream { status },
             message: text.into(),
         },
         Error::Transport {
@@ -456,6 +457,31 @@ proptest! {
             .and_then(|tail| tail.strip_suffix('s'))
             .and_then(|digits| digits.parse::<u64>().ok());
         prop_assert_eq!(parsed, Some(secs));
+    }
+
+    /// `Error::status()` reports exactly what the structured kind carries, for
+    /// every possible code: reconciliation never has to parse the message to
+    /// learn the status, and the two transport-shaped kinds never invent one.
+    #[test]
+    fn an_ambiguous_status_is_the_kind_and_nothing_else(status in any::<u16>()) {
+        let upstream = Error::Ambiguous {
+            kind: AmbiguousKind::Upstream { status },
+            message: String::new(),
+        };
+        prop_assert_eq!(upstream.status(), Some(status));
+        prop_assert_eq!(
+            upstream.status(),
+            AmbiguousKind::Upstream { status }.status()
+        );
+
+        for kind in [AmbiguousKind::Timeout, AmbiguousKind::Io] {
+            let error = Error::Ambiguous {
+                kind,
+                message: String::new(),
+            };
+            prop_assert_eq!(error.status(), None);
+            prop_assert_eq!(error.status(), kind.status());
+        }
     }
 
     /// The stance belongs to the variant — plus the status or transport kind it

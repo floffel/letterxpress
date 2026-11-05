@@ -7,8 +7,9 @@ mod common;
 use common::{client_with, fixture, pdf};
 use letterxpress::transport::{MockTransport, Response, Transport};
 use letterxpress::{
-    Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus, Letter, Mode,
-    Money, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS, MAX_PDF_BYTES,
+    AmbiguousKind, Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus,
+    Letter, Mode, Money, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
+    MAX_PDF_BYTES,
 };
 
 fn client_for(status: u16, body: &str) -> Client<MockTransport> {
@@ -65,7 +66,21 @@ async fn bodiless_submits_are_ambiguous_not_terminal() {
             .expect_err("a submit without a decoded job is ambiguous");
         assert!(error.is_ambiguous(), "{status} {body:?}: {error:?}");
         assert!(!error.is_retryable(), "{status} {body:?}: {error:?}");
-        assert_eq!(error.status(), None, "{status} {body:?}: {error:?}");
+        assert_eq!(
+            error.status(),
+            Some(status),
+            "{status} {body:?}: the status the provider answered with is kept as data"
+        );
+        assert!(
+            matches!(
+                error,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: actual },
+                    ..
+                } if actual == status
+            ),
+            "{status} {body:?}: structured kind"
+        );
     }
 }
 
@@ -241,10 +256,14 @@ async fn an_unfollowed_informational_or_redirect_answer_to_a_submit_is_ambiguous
             .expect_err("must fail");
         assert!(error.is_ambiguous(), "{status} produced {error:?}");
         assert!(!error.is_retryable(), "{status} produced {error:?}");
+        assert_eq!(error.status(), Some(status), "{status} produced {error:?}");
         assert!(
             matches!(
                 &error,
-                Error::Ambiguous { message } if message.contains(&format!("http {status}"))
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: actual },
+                    ..
+                } if *actual == status
             ),
             "{status} produced {error:?}"
         );
@@ -274,10 +293,14 @@ async fn an_unfollowed_informational_or_redirect_answer_to_an_email_submit_is_am
             .expect_err("must fail");
         assert!(error.is_ambiguous(), "{status} produced {error:?}");
         assert!(!error.is_retryable(), "{status} produced {error:?}");
+        assert_eq!(error.status(), Some(status), "{status} produced {error:?}");
         assert!(
             matches!(
                 &error,
-                Error::Ambiguous { message } if message.contains(&format!("http {status}"))
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: actual },
+                    ..
+                } if *actual == status
             ),
             "{status} produced {error:?}"
         );
@@ -492,6 +515,17 @@ async fn an_unreadable_flag_on_a_billed_submit_is_ambiguous() {
 
     assert!(error.is_ambiguous(), "the job may exist and be billed");
     assert!(!error.is_retryable(), "never resubmit what may be billed");
+    assert_eq!(error.status(), Some(200), "the provider answered a 2xx");
+    assert!(
+        matches!(
+            &error,
+            Error::Ambiguous {
+                kind: AmbiguousKind::Upstream { status: 200 },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +552,17 @@ async fn a_submit_timeout_is_ambiguous_and_sent_once() {
 
     assert!(error.is_ambiguous());
     assert!(!error.is_retryable());
+    assert!(
+        matches!(
+            error,
+            Error::Ambiguous {
+                kind: AmbiguousKind::Timeout,
+                ..
+            }
+        ),
+        "a timeout is its own kind: {error:?}"
+    );
+    assert_eq!(error.status(), None, "no answer carried a status");
     assert_eq!(
         recorder.requests().len(),
         1,
@@ -542,6 +587,16 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
 
     assert!(!error.is_ambiguous(), "nothing was written");
     assert!(error.is_retryable());
+    assert!(
+        matches!(
+            error,
+            Error::Transport {
+                kind: TransportKind::Connect,
+                ..
+            }
+        ),
+        "a connect-phase failure stays a plain transport error: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -566,12 +621,87 @@ async fn a_submit_5xx_is_ambiguous_but_a_read_5xx_is_not() {
         .await
         .expect_err("must fail");
     assert!(error.is_ambiguous());
+    assert_eq!(error.status(), Some(500));
+    assert!(
+        matches!(
+            &error,
+            Error::Ambiguous {
+                kind: AmbiguousKind::Upstream { status: 500 },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
     assert!(error.to_string().contains("http 500"));
 
     let client = client_for(500, r#"{"message":"Internal Server Error"}"#);
     let error = client.balance().await.expect_err("must fail");
     assert!(!error.is_ambiguous());
     assert!(matches!(error, Error::Upstream { status: 500, .. }));
+}
+
+#[tokio::test]
+async fn the_submit_status_boundary_decides_between_rejected_and_reconciliation() {
+    // Just below the 5xx class: a definitive refusal, nothing was created.
+    let client = client_for(499, r#"{"message":"Client Closed Request"}"#);
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+    assert!(!error.is_ambiguous(), "499: {error:?}");
+    assert_eq!(error.status(), Some(499));
+
+    // The 5xx class, first and last code, plus one outside the documented
+    // classes: each answer came back from the provider, so the submit may
+    // already have been processed and the code is kept as data.
+    for status in [500, 599, 600] {
+        let client = client_for(status, r#"{"message":"upstream"}"#);
+        let error = client
+            .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+            .await
+            .expect_err("must fail");
+        assert!(error.is_ambiguous(), "{status}: {error:?}");
+        assert_eq!(error.status(), Some(status), "{status}: {error:?}");
+        assert!(
+            matches!(
+                &error,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: actual },
+                    ..
+                } if *actual == status
+            ),
+            "{status}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_submit_io_failure_is_its_own_kind() {
+    let client = Client::new(
+        MockTransport::new([Err(Error::Transport {
+            kind: TransportKind::Io,
+            message: "connection reset by peer".into(),
+        })]),
+        Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
+    );
+
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+
+    assert!(error.is_ambiguous());
+    assert_eq!(error.status(), None, "no answer carried a status");
+    assert!(
+        matches!(
+            error,
+            Error::Ambiguous {
+                kind: AmbiguousKind::Io,
+                ..
+            }
+        ),
+        "a mid-flight failure is distinguished from a timeout: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -604,7 +734,21 @@ async fn a_submit_200_with_an_undecodable_body_is_ambiguous() {
             .expect_err("must fail");
         assert!(error.is_ambiguous(), "{body:?} produced {error:?}");
         assert!(!error.is_retryable(), "{body:?} produced {error:?}");
-        assert_eq!(error.status(), None, "{body:?} was answered with a 2xx");
+        assert_eq!(
+            error.status(),
+            Some(200),
+            "{body:?}: the 2xx that created the job is kept as data"
+        );
+        assert!(
+            matches!(
+                &error,
+                Error::Ambiguous {
+                    kind: AmbiguousKind::Upstream { status: 200 },
+                    ..
+                }
+            ),
+            "{body:?} produced {error:?}"
+        );
     }
 }
 
@@ -666,6 +810,7 @@ async fn an_email_submit_200_with_an_undecodable_body_is_ambiguous() {
             .expect_err("must fail");
         assert!(error.is_ambiguous(), "{body:?} produced {error:?}");
         assert!(!error.is_retryable(), "{body:?} produced {error:?}");
+        assert_eq!(error.status(), Some(200), "{body:?} produced {error:?}");
     }
 }
 

@@ -11,12 +11,13 @@ use letterxpress::transport::{
     Method, MockTransport, RecordedRequest, RecordingTransport, Request, Response, Transport,
 };
 use letterxpress::{
-    Backgrounds, Balance, BankForm, Color, Date, Deletion, EmailDelivery, EmailJob, EmailJobPage,
-    EmailJobQuery, EmailJobSubmission, EmailJobUpdate, EmailOption, Error, InvoiceDocument,
-    InvoiceId, InvoicePage, JobFilter, JobId, JobStatus, Journal, JournalFilter, JournalType,
-    Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest, PrintItem, PrintJob,
-    PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered, Separator, Shipping,
-    Specification, Terms, TransactionFilter, TransactionPage, TransactionQuery, TransportKind,
+    AmbiguousKind, Backgrounds, Balance, BankForm, Color, Date, Deletion, EmailDelivery, EmailJob,
+    EmailJobPage, EmailJobQuery, EmailJobSubmission, EmailJobUpdate, EmailOption, Error,
+    InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, JobStatus, Journal, JournalFilter,
+    JournalType, Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest, PrintItem,
+    PrintJob, PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered, Separator,
+    Shipping, Specification, Terms, TransactionFilter, TransactionPage, TransactionQuery,
+    TransportKind,
 };
 use serde_json::json;
 
@@ -646,7 +647,26 @@ fn every_error_variant_renders_and_classifies() {
         ),
         (
             Error::Ambiguous {
+                kind: AmbiguousKind::Upstream { status: 500 },
+                message: "provider answered http 500".into(),
+            },
+            Some(500),
+            false,
+            true,
+        ),
+        (
+            Error::Ambiguous {
+                kind: AmbiguousKind::Timeout,
                 message: "timeout".into(),
+            },
+            None,
+            false,
+            true,
+        ),
+        (
+            Error::Ambiguous {
+                kind: AmbiguousKind::Io,
+                message: "reset".into(),
             },
             None,
             false,
