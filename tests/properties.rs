@@ -1,11 +1,13 @@
 //! Property tests: the invariants that must hold for *every* input, not just
 //! the fixtures.
 //!
-//! Three groups: payload builders (a value that passes validation always
+//! Four groups: payload builders (a value that passes validation always
 //! produces the documented wire shape), parsers (no input panics, and decoding
-//! is permissive), and the money/date arithmetic.
+//! is permissive), the money/date arithmetic, and the retry decision.
 
 mod common;
+
+use std::time::Duration;
 
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
@@ -88,9 +90,17 @@ fn every_variant(text: &str, status: u16, kind: TransportKind) -> Vec<Error> {
     ]
 }
 
-/// The three answers the documented table gives per variant.
-fn stance(error: &Error) -> (bool, bool, Option<u16>) {
-    (error.is_retryable(), error.is_ambiguous(), error.status())
+/// The answers the documented table gives per variant: retry for a submit,
+/// retry for a read, ambiguity, whether a `Retry-After` hint is carried, and
+/// the HTTP status.
+fn stance(error: &Error) -> (bool, bool, bool, bool, Option<u16>) {
+    (
+        error.is_retryable(),
+        error.is_retryable_for(true),
+        error.is_ambiguous(),
+        error.retry_after().is_some(),
+        error.status(),
+    )
 }
 
 proptest! {
@@ -492,6 +502,18 @@ proptest! {
                 "{}: a possible duplicate is never retryable",
                 left
             );
+            prop_assert!(
+                !(left.is_retryable_for(true) && left.is_ambiguous()),
+                "{}: a possible duplicate is never retryable, not even for a read",
+                left
+            );
+            if left.is_retryable() {
+                prop_assert!(
+                    left.is_retryable_for(true),
+                    "{}: an idempotent request is never worse off than a submit",
+                    left
+                );
+            }
         }
     }
 }
@@ -576,7 +598,7 @@ fn unreadable_json_and_the_wrong_shape_share_one_stance() {
 
     assert_eq!(stance(&constructed), stance(&converted));
     assert_eq!(stance(&converted), stance(&shape));
-    assert_eq!(stance(&converted), (false, false, None));
+    assert_eq!(stance(&converted), (false, false, false, false, None));
     assert!(std::error::Error::source(&converted).is_some());
 }
 
@@ -609,4 +631,92 @@ async fn a_letter_without_a_notice_is_still_submittable() {
     let letter = Letter::new(&pdf()).expect("letter");
     assert!(letter.notice().is_none());
     client.submit_print_job(&letter).await.expect("submit");
+}
+
+/// Any failure whose payload the client can vary: the status it carries, the
+/// transport kind that produced it, and the `Retry-After` a rate limit saw.
+fn arbitrary_errors(kind: TransportKind, status: u16, retry_after: Option<Duration>) -> Vec<Error> {
+    vec![
+        Error::Upstream {
+            status,
+            message: String::new(),
+        },
+        Error::Rejected {
+            status,
+            message: String::new(),
+        },
+        Error::UnexpectedStatus {
+            status,
+            endpoint: "GET /v3/balance",
+            message: String::new(),
+        },
+        Error::RateLimited { retry_after },
+        Error::Transport {
+            kind,
+            source: Box::new(std::io::Error::other("")),
+        },
+        Error::NotFound {
+            message: String::new(),
+        },
+        Error::Ambiguous {
+            message: String::new(),
+        },
+    ]
+}
+
+/// Every [`TransportKind`], listed rather than sampled from a `Debug` string.
+fn transport_kind_strategy() -> impl Strategy<Value = TransportKind> {
+    prop_oneof![
+        Just(TransportKind::Connect),
+        Just(TransportKind::Timeout),
+        Just(TransportKind::Io),
+        Just(TransportKind::Protocol),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The retry decision is a function of the error *and* the request, and the
+    /// two are consistent for every status, kind and `Retry-After` the provider
+    /// can produce:
+    ///
+    /// * `is_retryable()` is the submit answer, never the optimistic one;
+    /// * an idempotent request is never worse off than a submit;
+    /// * nothing retryable is ever ambiguous;
+    /// * `retry_after()` is exactly the hint the rate limit carried, and nothing
+    ///   else carries one.
+    #[test]
+    fn the_retry_decision_never_outruns_the_request_it_belongs_to(
+        kind in transport_kind_strategy(),
+        status in 100u16..=599,
+        retry_after in proptest::option::of(0u64..=86_400u64),
+    ) {
+        let retry_after = retry_after.map(Duration::from_secs);
+        for error in arbitrary_errors(kind, status, retry_after) {
+            let submit = error.is_retryable_for(false);
+            let read = error.is_retryable_for(true);
+
+            prop_assert_eq!(error.is_retryable(), submit, "{:?}", error);
+            if submit {
+                prop_assert!(read, "{:?}: a read is never worse off than a submit", error);
+            }
+            prop_assert!(
+                !(submit && error.is_ambiguous()),
+                "{:?}: a possible duplicate is never a retry",
+                error
+            );
+            prop_assert!(
+                !(read && error.is_ambiguous()),
+                "{:?}: a possible duplicate is never a retry, not even for a read",
+                error
+            );
+
+            if let Error::RateLimited { .. } = &error {
+                prop_assert_eq!(error.retry_after(), retry_after);
+            } else {
+                prop_assert_eq!(error.retry_after(), None, "{:?}", error);
+            }
+        }
+    }
 }

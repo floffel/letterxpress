@@ -454,6 +454,10 @@ mod tests {
             assert_eq!(error.status(), Some(status));
             assert!(!error.is_ambiguous());
             assert!(!error.is_retryable());
+            assert!(
+                !error.is_retryable_for(true),
+                "{status}: a redirect is terminal even for a read"
+            );
             assert!(error.to_string().contains(&status.to_string()));
         }
 

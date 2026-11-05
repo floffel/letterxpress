@@ -5,7 +5,7 @@
 mod common;
 
 use common::{client_with, fixture, pdf};
-use letterxpress::transport::{MockTransport, Response, Transport};
+use letterxpress::transport::{Method, MockTransport, Response, Transport};
 use letterxpress::{
     Client, Credentials, Date, EmailDelivery, EmailOption, Error, JobId, JobStatus, Letter, Mode,
     Money, MoneyError, PrintJob, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS,
@@ -543,10 +543,11 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
 
     assert!(!error.is_ambiguous(), "nothing was written");
     assert!(error.is_retryable());
+    assert!(error.is_retryable_for(Method::Post.is_idempotent()));
 }
 
 #[tokio::test]
-async fn a_read_timeout_stays_retryable() {
+async fn a_read_timeout_is_retryable_for_the_read_but_not_by_default() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
             kind: TransportKind::Timeout,
@@ -556,7 +557,14 @@ async fn a_read_timeout_stays_retryable() {
     );
     let error = client.balance().await.expect_err("must fail");
     assert!(!error.is_ambiguous());
-    assert!(error.is_retryable());
+    assert!(
+        error.is_retryable_for(Method::Get.is_idempotent()),
+        "the same failure on a submit would be ambiguous"
+    );
+    assert!(
+        !error.is_retryable(),
+        "the context-free answer stays the submit one"
+    );
 }
 
 #[tokio::test]
@@ -567,11 +575,20 @@ async fn a_submit_5xx_is_ambiguous_but_a_read_5xx_is_not() {
         .await
         .expect_err("must fail");
     assert!(error.is_ambiguous());
+    assert!(!error.is_retryable_for(Method::Post.is_idempotent()));
     assert!(error.to_string().contains("http 500"));
 
     let client = client_for(500, r#"{"message":"Internal Server Error"}"#);
     let error = client.balance().await.expect_err("must fail");
     assert!(!error.is_ambiguous());
+    assert!(
+        error.is_retryable_for(Method::Get.is_idempotent()),
+        "a 5xx answer on a read is safe to retry"
+    );
+    assert!(
+        !error.is_retryable(),
+        "but a submit could already be billed"
+    );
     assert!(matches!(error, Error::Upstream { status: 500, .. }));
 }
 

@@ -1032,6 +1032,10 @@ mod tests {
         );
         if let Err(error) = &outcome {
             assert!(!error.is_retryable());
+            assert!(
+                !error.is_retryable_for(true),
+                "a local adapter failure is terminal even for a read"
+            );
         }
     }
 
