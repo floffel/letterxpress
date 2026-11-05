@@ -221,6 +221,7 @@ cargo test --all-features     # 464 tests: fixtures, edge matrix, properties, 32
 cargo test --no-default-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_envelope
+cargo +nightly fuzz run date_parse
 ```
 
 - `tests/contract.rs` decodes every documented example.
@@ -235,6 +236,8 @@ cargo +nightly fuzz run parse_envelope
 - `fuzz/fuzz_targets/parse_envelope.rs` feeds arbitrary bytes through the
   envelope parser, every model and every derived accessor, under success and
   error statuses. The corpus is seeded with all documentation fixtures.
+- `fuzz/fuzz_targets/date_parse.rs` feeds arbitrary UTF-8 bytes through
+  `Date::parse` and checks that every accepted date round-trips.
 
 Coverage is measured without the `http` feature: the reqwest adapter is the only
 code that needs a socket, and everything else runs against the mock transport.

@@ -29,4 +29,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "date_parse"
+path = "fuzz_targets/date_parse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
