@@ -513,28 +513,68 @@ impl Transport for MockTransport {
 /// ```
 /// use letterxpress::transport::Method;
 ///
-/// let recorded = letterxpress::transport::RecordedRequest {
-///     method: Method::Post,
-///     url: "https://example.test/v3/printjobs".to_string(),
-///     body: br#"{"auth":{}}"#.to_vec(),
-///     headers: Vec::new(),
-/// };
+/// let recorded = letterxpress::transport::RecordedRequest::new(
+///     Method::Post,
+///     "https://example.test/v3/printjobs",
+///     br#"{"auth":{}}"#.to_vec(),
+///     Vec::new(),
+/// );
 /// assert_eq!(recorded.json()?["auth"], serde_json::json!({}));
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecordedRequest {
     /// Verb that was used.
     pub method: Method,
     /// Full URL, including query string.
     pub url: String,
     /// Body bytes exactly as handed to the transport.
-    pub body: Vec<u8>,
+    ///
+    /// Private on purpose: the body carries the API key and a base64 letter, so
+    /// the redacting [`Debug`] impl must not be bypassable through a struct
+    /// literal. Use [`RecordedRequest::body`] to read it.
+    body: Vec<u8>,
     /// Headers that were set.
     pub headers: Vec<(String, String)>,
 }
 
 impl RecordedRequest {
+    /// Creates a recorded request value.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(Method::Get, "https://example.test/x", b"{}".to_vec(), Vec::new());
+    /// assert_eq!(recorded.body(), b"{}");
+    /// ```
+    #[must_use]
+    pub fn new(
+        method: Method,
+        url: impl Into<String>,
+        body: Vec<u8>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            method,
+            url: url.into(),
+            body,
+            headers,
+        }
+    }
+
+    /// Body bytes exactly as handed to the transport.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(Method::Get, "https://example.test/x", b"{}".to_vec(), Vec::new());
+    /// assert_eq!(recorded.body(), b"{}");
+    /// ```
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// The body parsed as JSON.
     ///
     /// # Errors
@@ -544,7 +584,7 @@ impl RecordedRequest {
     /// ```
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
-    /// let recorded = RecordedRequest { method: Method::Get, url: String::new(), body: b"not json".to_vec(), headers: Vec::new() };
+    /// let recorded = RecordedRequest::new(Method::Get, String::new(), b"not json".to_vec(), Vec::new());
     /// assert!(recorded.json().is_err());
     /// ```
     pub fn json(&self) -> Result<Value> {
@@ -565,14 +605,19 @@ impl RecordedRequest {
     /// ```
     /// use letterxpress::transport::{Method, RecordedRequest};
     ///
-    /// let recorded = RecordedRequest { method: Method::Get, url: "https://api.letterxpress.de/v3/printjobs?filter=hold".to_string(), body: Vec::new(), headers: Vec::new() };
+    /// let recorded = RecordedRequest::new(
+    ///     Method::Get,
+    ///     "https://api.letterxpress.de/v3/printjobs?filter=hold".to_string(),
+    ///     Vec::new(),
+    ///     Vec::new(),
+    /// );
     /// assert_eq!(recorded.path_and_query().as_deref(), Some("/v3/printjobs?filter=hold"));
     ///
     /// // A query on a pathless URL is kept, and a relative URL is rejected.
-    /// let pathless = RecordedRequest { method: Method::Get, url: "https://api.letterxpress.de?filter=hold".to_string(), body: Vec::new(), headers: Vec::new() };
+    /// let pathless = RecordedRequest::new(Method::Get, "https://api.letterxpress.de?filter=hold", Vec::new(), Vec::new());
     /// assert_eq!(pathless.path_and_query().as_deref(), Some("/?filter=hold"));
     ///
-    /// let relative = RecordedRequest { method: Method::Get, url: "/v3/balance".to_string(), body: Vec::new(), headers: Vec::new() };
+    /// let relative = RecordedRequest::new(Method::Get, "/v3/balance", Vec::new(), Vec::new());
     /// assert_eq!(relative.path_and_query(), None);
     /// ```
     #[must_use]
@@ -584,6 +629,33 @@ impl RecordedRequest {
             target.push_str(query);
         }
         Some(target)
+    }
+}
+
+impl fmt::Debug for RecordedRequest {
+    /// Prints method, URL, headers and body **length** — never the body, which
+    /// carries the API key and a base64 letter.
+    ///
+    /// ```
+    /// use letterxpress::transport::{Method, RecordedRequest};
+    ///
+    /// let recorded = RecordedRequest::new(
+    ///     Method::Post,
+    ///     "https://example.test/",
+    ///     br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+    ///     Vec::new(),
+    /// );
+    /// let debug = format!("{recorded:?}");
+    /// assert!(!debug.contains("secret"));
+    /// assert!(debug.contains("28 bytes"));
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordedRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("body", &format!("{} bytes", self.body.len()))
+            .field("headers", &self.headers)
+            .finish()
     }
 }
 
@@ -651,12 +723,12 @@ impl<T: Transport> Transport for RecordingTransport<T> {
     async fn execute(&self, request: Request) -> Result<Response> {
         {
             let mut log = lock(&self.log);
-            log.push(RecordedRequest {
-                method: request.method,
-                url: request.url.clone(),
-                body: request.body.clone().unwrap_or_default(),
-                headers: request.headers.clone(),
-            });
+            log.push(RecordedRequest::new(
+                request.method,
+                request.url.clone(),
+                request.body.clone().unwrap_or_default(),
+                request.headers.clone(),
+            ));
         }
         self.inner.execute(request).await
     }
@@ -672,7 +744,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
 /// use letterxpress::{Client, Credentials, Mode, ReqwestTransport};
 ///
 /// let client = Client::new(
-///     ReqwestTransport::new(),
+///     ReqwestTransport::new()?,
 ///     Credentials::new("kunde", std::env::var("LETTERXPRESS_APIKEY")?, Mode::Test)?,
 /// );
 /// println!("balance: {} EUR", client.balance().await?.balance);
@@ -680,7 +752,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
 }
@@ -690,18 +762,24 @@ impl ReqwestTransport {
     /// Creates a transport with a default client (rustls, no redirects
     /// followed — a redirect would move the credential to another host).
     ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] with [`TransportKind::Protocol`] when the hardened
+    /// client cannot be built. It never falls back to a default client, which
+    /// would follow redirects and carry the credential-bearing body to another
+    /// host.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
-    /// let transport = letterxpress::ReqwestTransport::new();
+    /// # fn demo() -> letterxpress::Result<()> {
+    /// let transport = letterxpress::ReqwestTransport::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-        }
+    pub fn new() -> Result<Self> {
+        let client = build_reqwest_client(reqwest::Client::builder())
+            .map_err(|error| describe_reqwest_error(&error))?;
+        Ok(Self { client })
     }
 
     /// Reuses an existing `reqwest::Client` (for connection pooling with the
@@ -741,16 +819,7 @@ impl Transport for ReqwestTransport {
             .await
             .map_err(|error| describe_reqwest_error(&error))?;
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let headers = collect_response_headers(response.headers());
         let body = response
             .bytes()
             .await
@@ -761,6 +830,28 @@ impl Transport for ReqwestTransport {
     }
 }
 
+/// Builds the hardened client the transport uses: the redirect policy is part
+/// of the builder, so the only successful construction path has it in place.
+#[cfg(feature = "http")]
+fn build_reqwest_client(
+    builder: reqwest::ClientBuilder,
+) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    builder.redirect(reqwest::redirect::Policy::none()).build()
+}
+
+#[cfg(feature = "http")]
+fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|text| (name.as_str().to_string(), text.to_string()))
+        })
+        .collect()
+}
+
 /// Maps a `reqwest` failure to a typed transport error without echoing the
 /// request body (which carries the API key).
 #[cfg(feature = "http")]
@@ -769,7 +860,7 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
         TransportKind::Timeout
     } else if error.is_connect() {
         TransportKind::Connect
-    } else if error.is_body() || error.is_decode() || error.is_request() {
+    } else if error.is_builder() || error.is_body() || error.is_decode() || error.is_request() {
         TransportKind::Protocol
     } else {
         TransportKind::Io
@@ -828,5 +919,148 @@ mod tests {
         );
         let debug = format!("{request:?}");
         assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn recorded_request_debug_never_prints_the_body() {
+        let recorded = RecordedRequest::new(
+            Method::Post,
+            "https://example.test/",
+            br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+            Vec::new(),
+        );
+        let debug = format!("{recorded:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("28 bytes"));
+    }
+
+    #[test]
+    fn recorded_request_debug_covers_the_empty_and_one_byte_body_boundary() {
+        let empty =
+            RecordedRequest::new(Method::Get, "https://example.test/", Vec::new(), Vec::new());
+        let debug = format!("{empty:?}");
+        assert!(debug.contains("0 bytes"));
+
+        let one_byte = RecordedRequest::new(
+            Method::Get,
+            "https://example.test/",
+            b"Z".to_vec(),
+            Vec::new(),
+        );
+        let debug = format!("{one_byte:?}");
+        assert!(debug.contains("1 bytes"));
+        assert!(!debug.contains('Z'));
+        assert_eq!(one_byte.body(), b"Z");
+    }
+
+    /// The reported leak path: `format!("{recorder:?}")` and a failed
+    /// `assert_eq!` on `requests()` both render the log through this wrapper.
+    #[test]
+    fn recorder_debug_never_prints_the_body() {
+        let recorder =
+            RecordingTransport::new(MockTransport::new([Ok(Response::json_response(200, "{}"))]));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            recorder
+                .execute(Request::new(
+                    Method::Post,
+                    "https://example.test/v3/printjobs",
+                    Some(br#"{"auth":{"apikey":"secret"}}"#.to_vec()),
+                ))
+                .await
+                .expect("scripted response");
+        });
+
+        let debug = format!("{recorder:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("28 bytes"));
+
+        let rendered_log = format!("{:?}", recorder.requests());
+        assert!(!rendered_log.contains("secret"));
+        assert_eq!(
+            recorder.requests()[0].body(),
+            br#"{"auth":{"apikey":"secret"}}"#
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_new_builds_the_hardened_client() {
+        assert!(ReqwestTransport::new().is_ok());
+    }
+
+    /// Runs the same steps as [`ReqwestTransport::new`] with a caller-chosen
+    /// builder, so a failing builder is reachable from a test.
+    #[cfg(feature = "http")]
+    fn built_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
+        build_reqwest_client(builder).map_err(|error| describe_reqwest_error(&error))
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn non_utf8_response_headers_are_dropped_not_emptied() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_bytes(b"\xFF").expect("header value"),
+        );
+        headers.insert("x-rate", reqwest::header::HeaderValue::from_static("9"));
+
+        let response = Response::new(429, collect_response_headers(&headers), Vec::new());
+        assert_eq!(response.header("retry-after"), None);
+        assert_eq!(response.header("x-rate"), Some("9"));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_new_fails_closed_on_a_broken_builder() {
+        // No fallback client: the failure is reported, and it is terminal.
+        let outcome = built_client(reqwest::Client::builder().user_agent("letterxpress\u{7f}"));
+        assert!(
+            matches!(
+                &outcome,
+                Err(Error::Transport {
+                    kind: TransportKind::Protocol,
+                    ..
+                })
+            ),
+            "a builder failure must be a terminal protocol error, got {outcome:?}"
+        );
+        if let Err(error) = &outcome {
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn reqwest_transport_builder_accepts_a_tab_and_rejects_a_line_feed() {
+        // 0x09 (tab) is the last byte `http` accepts in a header value, 0x0A
+        // (LF) the next code point and the first one it rejects.
+        assert!(
+            built_client(reqwest::Client::builder().user_agent("letterxpress/0.1\u{9}")).is_ok()
+        );
+        let outside = built_client(reqwest::Client::builder().user_agent("letterxpress/0.1\n"));
+        assert!(
+            matches!(
+                &outside,
+                Err(Error::Transport {
+                    kind: TransportKind::Protocol,
+                    ..
+                })
+            ),
+            "the first illegal header byte must fail closed, got {outside:?}"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn utf8_empty_response_header_stays_present_and_empty() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", reqwest::header::HeaderValue::from_static(""));
+
+        let response = Response::new(429, collect_response_headers(&headers), Vec::new());
+        assert_eq!(response.header("retry-after"), Some(""));
     }
 }

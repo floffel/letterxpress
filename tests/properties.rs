@@ -238,12 +238,7 @@ proptest! {
             expected.push_str(query);
         }
 
-        let recorded = RecordedRequest {
-            method: Method::Get,
-            url: text,
-            body: Vec::new(),
-            headers: Vec::new(),
-        };
+        let recorded = RecordedRequest::new(Method::Get, text, Vec::new(), Vec::new());
         prop_assert_eq!(recorded.path_and_query(), Some(expected));
     }
 
@@ -251,12 +246,7 @@ proptest! {
     /// the text as an absolute URL.
     #[test]
     fn path_and_query_never_panics(text in ".*") {
-        let recorded = RecordedRequest {
-            method: Method::Get,
-            url: text.clone(),
-            body: Vec::new(),
-            headers: Vec::new(),
-        };
+        let recorded = RecordedRequest::new(Method::Get, text.clone(), Vec::new(), Vec::new());
         prop_assert_eq!(
             recorded.path_and_query().is_some(),
             url::Url::parse(&text).is_ok(),

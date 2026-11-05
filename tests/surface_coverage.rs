@@ -783,33 +783,33 @@ fn request_debug_hides_the_body_and_paths_extract_correctly() {
     assert!(debug.contains("6 bytes"));
     assert_eq!(request.header("content-type"), Some("application/json"));
 
-    let recorded = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de/v3/printjobs?filter=hold".into(),
-        body: b"{}".to_vec(),
-        headers: Vec::new(),
-    };
+    let recorded = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de/v3/printjobs?filter=hold",
+        b"{}".to_vec(),
+        Vec::new(),
+    );
     assert_eq!(
         recorded.path_and_query().as_deref(),
         Some("/v3/printjobs?filter=hold")
     );
 
-    let bare_host = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let bare_host = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(bare_host.path_and_query().as_deref(), Some("/"));
 
     // Just inside the boundary: a pathless URL still has a query, and the
     // slash inside the userinfo is not the start of the path.
-    let pathless_with_query = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de?filter=hold".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let pathless_with_query = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de?filter=hold",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(
         pathless_with_query.path_and_query().as_deref(),
         Some("/?filter=hold")
@@ -817,12 +817,12 @@ fn request_debug_hides_the_body_and_paths_extract_correctly() {
 
     // Just inside the boundary: the fragment is dropped, and a slash in the
     // userinfo does not shift the split point.
-    let userinfo = RecordedRequest {
-        method: Method::Get,
-        url: "https://user:pa%2Fss@api.letterxpress.de/v3/printjobs/5?x=1#frag".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let userinfo = RecordedRequest::new(
+        Method::Get,
+        "https://user:pa%2Fss@api.letterxpress.de/v3/printjobs/5?x=1#frag",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(
         userinfo.path_and_query().as_deref(),
         Some("/v3/printjobs/5?x=1")
@@ -830,63 +830,62 @@ fn request_debug_hides_the_body_and_paths_extract_correctly() {
 
     // A raw slash in the userinfo makes the URL invalid; fail closed instead of
     // splitting at it.
-    let invalid_userinfo = RecordedRequest {
-        method: Method::Get,
-        url: "https://user:pa/ss@api.letterxpress.de/v3/printjobs/5?x=1".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let invalid_userinfo = RecordedRequest::new(
+        Method::Get,
+        "https://user:pa/ss@api.letterxpress.de/v3/printjobs/5?x=1",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(invalid_userinfo.path_and_query(), None);
 
     // Just outside the boundary: anything that is not an absolute URL is
     // rejected instead of being returned whole.
-    let relative = RecordedRequest {
-        method: Method::Get,
-        url: "/v3/balance".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let relative = RecordedRequest::new(Method::Get, "/v3/balance", Vec::new(), Vec::new());
     assert_eq!(relative.path_and_query(), None);
 
-    let empty = RecordedRequest {
-        method: Method::Get,
-        url: String::new(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let empty = RecordedRequest::new(Method::Get, String::new(), Vec::new(), Vec::new());
     assert_eq!(empty.path_and_query(), None);
 
     // A malformed URL is rejected as well, and a multi-byte path is returned
     // unchanged rather than sliced on a byte offset.
-    let malformed = RecordedRequest {
-        method: Method::Get,
-        url: "https://exa mple.test/v3/printjobs".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let malformed = RecordedRequest::new(
+        Method::Get,
+        "https://exa mple.test/v3/printjobs",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(malformed.path_and_query(), None);
 
     // A multi-byte path is percent-encoded by the parser, never sliced on a
     // byte offset.
-    let unicode = RecordedRequest {
-        method: Method::Get,
-        url: "https://api.letterxpress.de/v3/bücher?q=ä".into(),
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
+    let unicode = RecordedRequest::new(
+        Method::Get,
+        "https://api.letterxpress.de/v3/bücher?q=ä",
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(
         unicode.path_and_query().as_deref(),
         Some("/v3/b%C3%BCcher?q=%C3%A4")
     );
 
-    assert!(RecordedRequest {
-        method: Method::Get,
-        url: String::new(),
-        body: b"not json".to_vec(),
-        headers: Vec::new(),
-    }
-    .json()
-    .is_err());
+    assert!(
+        RecordedRequest::new(Method::Get, String::new(), b"not json".to_vec(), Vec::new())
+            .json()
+            .is_err()
+    );
+
+    let recorded_debug = format!(
+        "{:?}",
+        RecordedRequest::new(
+            Method::Post,
+            "https://example.test/v3/printjobs",
+            br#"{"auth":{"apikey":"secret"}}"#.to_vec(),
+            Vec::new(),
+        )
+    );
+    assert!(!recorded_debug.contains("secret"));
+    assert!(recorded_debug.contains("28 bytes"));
 }
 
 #[tokio::test]
