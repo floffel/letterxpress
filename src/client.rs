@@ -37,8 +37,8 @@ use crate::transport::{Method, Request, Transport};
 use crate::{
     Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage, EmailJobSubmission,
     InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal, JournalType, Letter, Mode,
-    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Shipping, Specification,
-    TransactionFilter, TransactionPage, TransportKind,
+    Price, PriceRequest, PrintJob, PrintJobPage, Registered, Specification, TransactionFilter,
+    TransactionPage, TransportKind,
 };
 use crate::{Error, Result};
 
@@ -772,12 +772,11 @@ impl PrintJobUpdate {
     /// assert!(PrintJobUpdate::new(international).with_registered(Registered::Einschreiben).is_err());
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self> {
-        if self.specification.shipping() == Shipping::International {
-            return Err(Error::invalid(
-                "letter.registered",
-                "registered mail is national only",
-            ));
-        }
+        crate::letter::check_registered_shipping(
+            "letter.registered",
+            Some(&registered),
+            &self.specification.shipping(),
+        )?;
         self.registered = Some(registered);
         Ok(self)
     }
@@ -933,10 +932,13 @@ impl<T: Transport> Client<T> {
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a price
+    /// query that pairs registered mail with international shipping is refused
+    /// locally — otherwise the provider's answer mapped as described on
+    /// [`Error`] — including [`Error::Ambiguous`] when a submit may have been
+    /// processed.
     pub async fn price(&self, request: &PriceRequest) -> Result<Price> {
+        request.validate()?;
         let body = json!({ "letter": request.to_json() });
         let envelope = self.call(Method::Get, "/price", None, Some(body)).await?;
         decode_data("GET /v3/price", envelope)
@@ -1021,10 +1023,13 @@ impl<T: Transport> Client<T> {
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a
+    /// letter that pairs registered mail with international shipping is refused
+    /// locally, before the upload — otherwise the provider's answer mapped as
+    /// described on [`Error`] — including [`Error::Ambiguous`] when a submit may
+    /// have been processed.
     pub async fn submit_print_job(&self, letter: &Letter) -> Result<PrintJob> {
+        letter.validate()?;
         let body = json!({ "letter": letter.to_json() });
         let envelope = self
             .call(Method::Post, "/printjobs", None, Some(body))
@@ -1118,10 +1123,13 @@ impl<T: Transport> Client<T> {
     /// ```
     /// # Errors
     ///
-    /// [`Error::Validation`] for an argument the provider would reject, otherwise
-    /// the provider's answer mapped as described on [`Error`] — including
-    /// [`Error::Ambiguous`] when a submit may have been processed.
+    /// [`Error::Validation`] for an argument the provider would reject — a
+    /// letter that pairs registered mail with international shipping is refused
+    /// locally, before the upload — otherwise the provider's answer mapped as
+    /// described on [`Error`] — including [`Error::Ambiguous`] when a submit may
+    /// have been processed.
     pub async fn submit_email_job(&self, letter: &Letter) -> Result<EmailJobSubmission> {
+        letter.validate()?;
         let body = json!({ "letter": letter.to_json() });
         let envelope = self
             .call(Method::Post, "/emailjobs", None, Some(body))

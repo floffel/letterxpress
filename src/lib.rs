@@ -27,7 +27,7 @@
 //! println!("2 pages, B&W simplex: {}", quote.price);
 //!
 //! let letter = Letter::new(&std::fs::read("antrag.pdf")?)?
-//!     .with_shipping(Shipping::National)
+//!     .with_shipping(Shipping::National)?
 //!     .with_registered(Registered::EinschreibenEinwurf)?
 //!     .with_notice("antrag-4711")?;
 //!

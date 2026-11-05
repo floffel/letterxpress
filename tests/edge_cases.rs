@@ -1037,10 +1037,40 @@ fn filenames_cannot_smuggle_a_path() {
 
 #[test]
 fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
-    let international = Letter::new(&pdf())
+    // Valid: registered mail on the class it requires, in either order.
+    let national = Letter::new(&pdf())
         .expect("letter")
-        .with_shipping(Shipping::International);
-    let error = international
+        .with_shipping(Shipping::National)
+        .expect("national")
+        .with_registered(Registered::EinschreibenEinwurf)
+        .expect("registered");
+    assert_eq!(national.to_json()["registered"], "r1");
+    assert_eq!(national.to_json()["specification"]["shipping"], "national");
+
+    let registered_first = Letter::new(&pdf())
+        .expect("letter")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered")
+        .with_shipping(Shipping::National)
+        .expect("national");
+    assert_eq!(
+        registered_first.to_json()["specification"]["shipping"],
+        "national"
+    );
+
+    // Just inside the limit: `Auto` is not international, so the pair stays legal.
+    assert!(Letter::new(&pdf())
+        .expect("letter")
+        .with_shipping(Shipping::Auto)
+        .expect("auto")
+        .with_registered(Registered::Einschreiben)
+        .is_ok());
+
+    // Just outside: international, whichever setter runs first.
+    let error = Letter::new(&pdf())
+        .expect("letter")
+        .with_shipping(Shipping::International)
+        .expect("international")
         .with_registered(Registered::EinschreibenEinwurf)
         .expect_err("must fail");
     assert!(matches!(
@@ -1051,11 +1081,78 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
         }
     ));
 
+    let registered = Letter::new(&pdf())
+        .expect("letter")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered");
+    let error = registered
+        .clone()
+        .with_shipping(Shipping::International)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "letter.specification.shipping",
+            ..
+        }
+    ));
+
+    // Replacing the whole specification is the third way into the same pair.
+    let international = letterxpress::Specification::new().with_shipping(Shipping::International);
+    assert!(registered
+        .clone()
+        .with_specification(international)
+        .is_err());
+
+    // A carry-all spelling of the same wire value cannot slip past the rule,
+    // padded or not.
+    let smuggled = Shipping::from_wire("International");
+    assert!(matches!(smuggled, Shipping::International));
+    assert!(registered
+        .clone()
+        .with_shipping(Shipping::Other("international".into()))
+        .is_err());
+    assert!(registered
+        .clone()
+        .with_shipping(Shipping::Other("  international  ".into()))
+        .is_err());
+}
+
+#[test]
+fn a_price_request_carries_the_same_pair_and_the_same_rule() {
     let international = letterxpress::PriceRequest::new(1)
         .expect("price")
-        .with_shipping(Shipping::International);
-    assert!(international
+        .with_shipping(Shipping::International)
+        .expect("international");
+    let error = international
         .with_registered(Registered::Einschreiben)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "price.registered",
+            ..
+        }
+    ));
+
+    let registered = letterxpress::PriceRequest::new(1)
+        .expect("price")
+        .with_registered(Registered::Einschreiben)
+        .expect("registered");
+    let error = registered
+        .clone()
+        .with_shipping(Shipping::International)
+        .expect_err("must fail");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "price.specification.shipping",
+            ..
+        }
+    ));
+    assert!(registered.clone().with_shipping(Shipping::National).is_ok());
+    assert!(registered
+        .with_shipping(Shipping::Other("international".into()))
         .is_err());
 }
 
