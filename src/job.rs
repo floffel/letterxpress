@@ -22,6 +22,12 @@
 //!   statement about the price that nobody made. See
 //!   [`PriceEcho::from_envelope`].
 //!
+//! The permissiveness is declared, not visited: the scalar shapes (`"7"`, `7`,
+//! `6035138.0`, `true`, null) are one `#[serde(untagged)]` enum that the id,
+//! text and flag decoders share, and the three `POST /v3/emailjobs` answer
+//! shapes are one `#[serde(untagged)]` enum, so `serde` reads the shape from the
+//! payload instead of this module sniffing keys.
+//!
 //! ```
 //! use letterxpress::PrintJob;
 //!
@@ -39,7 +45,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::de::{self, Visitor};
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -138,37 +144,80 @@ macro_rules! record_id {
 
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let raw = deserializer.deserialize_any(IdVisitor)?;
+                // Ids arrive as numbers, as strings and, in the provider's
+                // exports, as floats (`6035138.0`). The scalar does the shape
+                // work; only the id rules below are crate-specific.
+                let raw = Scalar::deserialize(deserializer)?
+                    .into_id()
+                    .map_err(de::Error::custom)?;
                 Self::new(raw).map_err(|error| de::Error::custom(error.to_string()))
             }
         }
     };
 }
 
-/// Accepts an id as a string or an integer.
-struct IdVisitor;
+/// Any JSON scalar, wherever the provider documented text or a flag.
+///
+/// One declaration replaces a hand-written visitor per field: `serde` walks the
+/// scalar types itself, so a value arrives whether the provider rendered it as
+/// a string, an integer or — in its CSV-derived exports — as a float such as
+/// `6035138.0`. `null` is not a variant here: every such field is decoded as an
+/// `Option`, which carries the null case on its own.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Scalar {
+    /// Text, as documented.
+    Text(String),
+    /// A flag rendered as a JSON boolean.
+    Bool(bool),
+    /// An integer.
+    Integer(i64),
+    /// An integer above [`i64::MAX`].
+    Unsigned(u64),
+    /// A number with a fraction.
+    Float(f64),
+}
 
-impl Visitor<'_> for IdVisitor {
-    type Value = String;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an id as a number or a string")
+impl Scalar {
+    /// The scalar as text, in the provider's own spelling: an integral float
+    /// loses its `.0`, everything else is its `Display` form.
+    fn into_text(self) -> String {
+        match self {
+            Self::Text(text) => text,
+            Self::Bool(flag) => flag.to_string(),
+            Self::Integer(number) => number.to_string(),
+            Self::Unsigned(number) => number.to_string(),
+            Self::Float(number) => number.to_string(),
+        }
     }
 
-    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(value.trim().to_owned())
+    /// The scalar as an identifier: trimmed text of a non-boolean scalar.
+    ///
+    /// A boolean is refused rather than spelled `"true"`: that string would
+    /// pass the alphanumeric id rule and turn a malformed response into a
+    /// plausible-looking id.
+    fn into_id(self) -> Result<String, String> {
+        match self {
+            Self::Bool(flag) => Err(format!("an id cannot be the boolean {flag}")),
+            other => Ok(other.into_text().trim().to_owned()),
+        }
     }
 
-    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
-        Ok(value.trim().to_owned())
-    }
-
-    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(value.to_string())
-    }
-
-    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(value.to_string())
+    /// The scalar as a flag: a boolean is itself, a number is `false` only when
+    /// it is zero, and a string follows the flag rule — the words
+    /// `true`/`yes`/`false`/`no`, a decimal number, or "not supplied" for the
+    /// empty string. Anything else is refused, so a C4 envelope the provider
+    /// spelled oddly cannot decode as "not requested".
+    fn into_flag(self) -> Result<bool, String> {
+        match self {
+            Self::Text(text) => flag_from_str(&text).ok_or_else(|| {
+                format!("flag value {text:?} is not a number, true/false, yes/no or null")
+            }),
+            Self::Bool(flag) => Ok(flag),
+            Self::Integer(number) => Ok(number != 0),
+            Self::Unsigned(number) => Ok(number != 0),
+            Self::Float(number) => Ok(number != 0.0),
+        }
     }
 }
 
@@ -240,96 +289,16 @@ fn flag_from_str(value: &str) -> Option<bool> {
 /// requested and billed C4 envelope must not decode as "not requested" just
 /// because the provider spelled the flag with another string.
 fn de_flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
-    struct FlagVisitor;
-
-    impl Visitor<'_> for FlagVisitor {
-        type Value = bool;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("0/1 or any other number, true/false, yes/no, their string forms or null")
-        }
-
-        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-            Ok(value)
-        }
-
-        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-            Ok(value != 0)
-        }
-
-        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-            Ok(value != 0)
-        }
-
-        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-            Ok(value != 0.0)
-        }
-
-        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-            flag_from_str(value).ok_or_else(|| {
-                E::custom(format_args!(
-                    "flag value {value:?} is not a number, true/false, yes/no or null"
-                ))
-            })
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(false)
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(false)
-        }
+    // `Option` carries the null case, [`Scalar`] every non-null spelling.
+    match Option::<Scalar>::deserialize(deserializer)? {
+        Some(scalar) => scalar.into_flag().map_err(de::Error::custom),
+        None => Ok(false),
     }
-
-    deserializer.deserialize_any(FlagVisitor)
 }
 
-/// A scalar that may arrive as a string, a number or null.
+/// A scalar that may arrive as a string, a number, a boolean or null.
 fn de_opt_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    struct TextVisitor;
-
-    impl Visitor<'_> for TextVisitor {
-        type Value = Option<String>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a string, a number or null")
-        }
-
-        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-            Ok(Some(value.to_owned()))
-        }
-
-        fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
-            Ok(Some(value))
-        }
-
-        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-            Ok(Some(value.to_string()))
-        }
-
-        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-            Ok(Some(value.to_string()))
-        }
-
-        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-            Ok(Some(value.to_string()))
-        }
-
-        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-            Ok(Some(value.to_string()))
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-    }
-
-    deserializer.deserialize_any(TextVisitor)
+    Ok(Option::<Scalar>::deserialize(deserializer)?.map(Scalar::into_text))
 }
 
 /// Status used when a response omits the field entirely.
@@ -976,12 +945,72 @@ pub enum EmailJobSubmission {
     },
 }
 
+/// The three answer shapes `POST /v3/emailjobs` documents, selected by `serde`
+/// from the payload itself instead of by sniffing keys.
+///
+/// The order is the precedence the provider uses: an array is a serial answer,
+/// an object carrying `printjobs` or `emailjobs` is a mixed answer, and only an
+/// object without either — one that carries an `id` — is a single job.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Answer {
+    /// One job per white-code in a serial letter.
+    Serial(Vec<EmailJob>),
+    /// A serial letter that produced print jobs and e-mail jobs.
+    Mixed(MixedAnswer),
+    /// One e-mail job, boxed so a private enum stays small next to the
+    /// collection variants.
+    Single(Box<EmailJob>),
+}
+
+/// The `printjobs`/`emailjobs` block of a mixed answer, in the two spellings the
+/// provider uses: both collections, or only one of them.
+///
+/// Each variant demands its key, so an object with an `id` and neither
+/// collection cannot be mistaken for a mixed answer.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MixedAnswer {
+    /// Both collections, as documented.
+    Both {
+        /// Print jobs created.
+        printjobs: Vec<PrintJob>,
+        /// E-mail jobs created.
+        emailjobs: Vec<EmailJob>,
+    },
+    /// A submission that produced print jobs only.
+    PrintOnly {
+        /// Print jobs created.
+        printjobs: Vec<PrintJob>,
+    },
+    /// A submission that produced e-mail jobs only.
+    EmailOnly {
+        /// E-mail jobs created.
+        emailjobs: Vec<EmailJob>,
+    },
+}
+
+impl MixedAnswer {
+    /// The two collections; a spelling that lacks one leaves it empty.
+    fn into_collections(self) -> (Vec<PrintJob>, Vec<EmailJob>) {
+        match self {
+            Self::Both {
+                printjobs,
+                emailjobs,
+            } => (printjobs, emailjobs),
+            Self::PrintOnly { printjobs } => (printjobs, Vec::new()),
+            Self::EmailOnly { emailjobs } => (Vec::new(), emailjobs),
+        }
+    }
+}
+
 impl EmailJobSubmission {
     /// Parses any of the three documented shapes.
     ///
     /// # Errors
     ///
-    /// [`serde_json::Error`] when the payload is neither shape.
+    /// [`serde_json::Error`] when the payload is neither shape, and when a
+    /// mixed envelope carries both collections empty.
     ///
     /// ```
     /// use letterxpress::EmailJobSubmission;
@@ -996,48 +1025,21 @@ impl EmailJobSubmission {
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     pub fn parse(value: Value) -> Result<Self, serde_json::Error> {
-        match value {
-            Value::Array(entries) => {
-                let jobs = entries
-                    .into_iter()
-                    .map(serde_json::from_value)
-                    .collect::<Result<Vec<EmailJob>, _>>()?;
-                Ok(Self::Serial(jobs))
-            }
-            Value::Object(map) => {
-                if map.contains_key("emailjobs") || map.contains_key("printjobs") {
-                    let print_jobs = map
-                        .get("printjobs")
-                        .cloned()
-                        .map(serde_json::from_value::<Vec<PrintJob>>)
-                        .transpose()?
-                        .unwrap_or_default();
-                    let email_jobs = map
-                        .get("emailjobs")
-                        .cloned()
-                        .map(serde_json::from_value::<Vec<EmailJob>>)
-                        .transpose()?
-                        .unwrap_or_default();
-                    if print_jobs.is_empty() && email_jobs.is_empty() {
-                        return Err(de::Error::custom(
-                            "email job response has neither printjobs nor emailjobs",
-                        ));
-                    }
-                    Ok(Self::Mixed {
-                        print_jobs,
-                        email_jobs,
-                    })
-                } else if map.contains_key("id") {
-                    Ok(Self::Single(serde_json::from_value(Value::Object(map))?))
-                } else {
-                    Err(de::Error::custom(
-                        "email job response is neither a job, an array, nor a mixed envelope",
-                    ))
+        match serde_json::from_value::<Answer>(value)? {
+            Answer::Serial(jobs) => Ok(Self::Serial(jobs)),
+            Answer::Single(job) => Ok(Self::Single(*job)),
+            Answer::Mixed(mixed) => {
+                let (print_jobs, email_jobs) = mixed.into_collections();
+                if print_jobs.is_empty() && email_jobs.is_empty() {
+                    return Err(de::Error::custom(
+                        "email job response has neither printjobs nor emailjobs",
+                    ));
                 }
+                Ok(Self::Mixed {
+                    print_jobs,
+                    email_jobs,
+                })
             }
-            _ => Err(de::Error::custom(
-                "email job response must be an object or an array",
-            )),
         }
     }
 
@@ -1764,18 +1766,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn flags_accept_every_documented_spelling() {
-        assert!(de_flag(serde_json::json!(true)).unwrap());
-        assert!(de_flag(serde_json::json!(1)).unwrap());
-        assert!(de_flag(serde_json::json!(1u64)).unwrap());
-        assert!(de_flag(serde_json::json!(2i64)).unwrap());
-        assert!(!de_flag(serde_json::json!(0)).unwrap());
-        assert!(de_flag(serde_json::json!("1")).unwrap());
-        assert!(de_flag(serde_json::json!("true")).unwrap());
-        assert!(!de_flag(serde_json::json!("0")).unwrap());
-        assert!(!de_flag(serde_json::json!(null)).unwrap());
-        assert!(!de_flag(serde_json::json!(false)).unwrap());
+    fn text(value: serde_json::Value) -> Option<String> {
+        de_opt_string(value).expect("a scalar decodes")
     }
 
     #[test]
@@ -1855,44 +1847,104 @@ mod tests {
     }
 
     #[test]
-    fn optional_text_accepts_every_scalar() {
+    fn text_fields_accept_every_scalar_and_null() {
+        assert_eq!(text(json!("x")), Some("x".to_owned()));
+        assert_eq!(text(json!(42)), Some("42".to_owned()));
+        assert_eq!(text(json!(-5)), Some("-5".to_owned()));
+        assert_eq!(text(json!(1.5)), Some("1.5".to_owned()));
+        assert_eq!(text(json!(true)), Some("true".to_owned()));
+        assert_eq!(text(json!(null)), None);
         assert_eq!(
-            de_opt_string(serde_json::json!("x")).unwrap(),
-            Some("x".into())
+            text(json!(u64::MAX)),
+            Some(u64::MAX.to_string()),
+            "an integer above i64::MAX keeps every digit"
         );
         assert_eq!(
-            de_opt_string(serde_json::json!("x".to_string())).unwrap(),
-            Some("x".into())
+            text(json!(6_035_138.0)),
+            Some("6035138".to_owned()),
+            "an integral float is text without the fraction"
         );
+        // A structure is not a scalar: the field is documented as text.
+        assert!(de_opt_string(json!({"a": 1})).is_err());
+        assert!(de_opt_string(json!([1])).is_err());
+    }
+
+    #[test]
+    fn ids_accept_numbers_strings_and_float_spellings() {
+        let from_float: JobId =
+            serde_json::from_value(json!(6_035_138.0)).expect("an id rendered as a float");
+        assert_eq!(from_float.as_str(), "6035138");
+
+        let from_string: JobId = serde_json::from_value(json!(" 42 ")).expect("a padded id");
+        assert_eq!(from_string.as_str(), "42", "surrounding space is trimmed");
+
+        let above_i64: JobId = serde_json::from_value(json!(u64::MAX)).expect("an unsigned id");
+        assert_eq!(above_i64.as_str(), u64::MAX.to_string());
+
+        let longest: JobId =
+            serde_json::from_value(json!("x".repeat(32))).expect("the documented maximum");
+        assert_eq!(longest.as_str().len(), 32);
+        assert!(
+            serde_json::from_value::<JobId>(json!("x".repeat(33))).is_err(),
+            "33 characters is one over the documented maximum"
+        );
+
+        assert!(
+            serde_json::from_value::<JobId>(json!(1.5)).is_err(),
+            "a fraction is not an id"
+        );
+        assert!(
+            serde_json::from_value::<JobId>(json!(true)).is_err(),
+            "a boolean is not an id, even though `true` is alphanumeric"
+        );
+        assert!(
+            serde_json::from_value::<JobId>(json!({"id": 1})).is_err(),
+            "a structure is not an id"
+        );
+    }
+
+    #[test]
+    fn every_answer_shape_is_selected_from_the_payload() {
+        let both = EmailJobSubmission::parse(json!({
+            "printjobs": [{"id": 1}],
+            "emailjobs": [{"id": 2}, {"id": 3}],
+        }))
+        .expect("a mixed answer with both collections");
+        assert_eq!(both.print_jobs().len(), 1);
+        assert_eq!(both.email_jobs().len(), 2);
+
+        let print_only = EmailJobSubmission::parse(json!({"printjobs": [{"id": 1}]}))
+            .expect("a mixed answer with print jobs only");
         assert_eq!(
-            de_opt_string(serde_json::json!(-5)).unwrap(),
-            Some("-5".into())
+            (print_only.print_jobs().len(), print_only.email_jobs().len()),
+            (1, 0),
+            "a print-only envelope carries no e-mail job"
         );
+
+        let email_only = EmailJobSubmission::parse(json!({"emailjobs": [{"id": 2}]}))
+            .expect("a mixed answer with e-mail jobs only");
         assert_eq!(
-            de_opt_string(serde_json::json!(5u64)).unwrap(),
-            Some("5".into())
+            (email_only.print_jobs().len(), email_only.email_jobs().len()),
+            (0, 1),
+            "an e-mail-only envelope carries no print job"
         );
-        assert_eq!(
-            de_opt_string(serde_json::json!(1.5)).unwrap(),
-            Some("1.5".into())
-        );
-        assert_eq!(
-            de_opt_string(serde_json::json!(true)).unwrap(),
-            Some("true".into())
-        );
-        assert_eq!(de_opt_string(serde_json::json!(null)).unwrap(), None);
-        assert_eq!(
-            IdVisitor.visit_str::<serde_json::Error>(" 42 ").unwrap(),
-            "42"
-        );
-        assert_eq!(
-            IdVisitor
-                .visit_string::<serde_json::Error>("7".to_string())
-                .unwrap(),
-            "7"
-        );
-        assert_eq!(IdVisitor.visit_i64::<serde_json::Error>(-1).unwrap(), "-1");
-        assert_eq!(IdVisitor.visit_u64::<serde_json::Error>(8).unwrap(), "8");
+
+        let single = EmailJobSubmission::parse(json!({"id": 7}))
+            .expect("a single job carries an id and no collection");
+        assert_eq!(single.email_jobs().len(), 1);
+
+        // An envelope that names a collection but carries no entry is a broken
+        // answer, not an empty one.
+        assert!(EmailJobSubmission::parse(json!({"printjobs": [], "emailjobs": []})).is_err());
+        assert!(EmailJobSubmission::parse(json!({"emailjobs": []})).is_err());
+        // An empty serial answer is legitimate: the letter had no white-codes.
+        let empty = EmailJobSubmission::parse(json!([])).expect("an empty array");
+        assert_eq!(empty.email_jobs().len(), 0);
+
+        assert!(EmailJobSubmission::parse(json!({})).is_err());
+        assert!(EmailJobSubmission::parse(json!(42)).is_err());
+        assert!(EmailJobSubmission::parse(json!("nope")).is_err());
+        assert!(EmailJobSubmission::parse(json!([{"nope": true}])).is_err());
     }
 
     #[test]
