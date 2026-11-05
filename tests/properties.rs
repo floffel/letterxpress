@@ -195,6 +195,36 @@ proptest! {
         );
     }
 
+    /// A text field keeps every scalar spelling the provider could use: numbers
+    /// become their `Display` form, strings survive byte for byte, and an id
+    /// rendered as an integer or a float decodes to the same digits.
+    #[test]
+    fn text_fields_keep_the_providers_spelling(
+        number in any::<u64>(),
+        fraction in any::<f64>(),
+        text in ".*",
+    ) {
+        let job: letterxpress::PrintJob =
+            serde_json::from_value(serde_json::json!({"id": number, "notice": number}))
+                .expect("a number is a valid id and a valid notice");
+        let expected = number.to_string();
+        prop_assert_eq!(job.id.as_str(), expected.as_str());
+        prop_assert_eq!(job.notice.as_deref(), Some(expected.as_str()));
+
+        let job: letterxpress::PrintJob =
+            serde_json::from_value(serde_json::json!({"id": 1, "notice": text}))
+                .expect("any string is a notice");
+        prop_assert_eq!(job.notice.as_deref(), Some(text.as_str()));
+
+        if fraction.is_finite() {
+            let job: letterxpress::PrintJob =
+                serde_json::from_value(serde_json::json!({"id": 1, "notice": fraction}))
+                    .expect("a finite float is a notice");
+            let expected = fraction.to_string();
+            prop_assert_eq!(job.notice.as_deref(), Some(expected.as_str()));
+        }
+    }
+
     /// Every colour/print-mode/shipping combination produces a valid
     /// specification with the documented wire values.
     #[test]
