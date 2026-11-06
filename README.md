@@ -68,8 +68,8 @@ sandbox endpoint — the mode field is the sandbox.
 | --- | --- | --- |
 | Credit | `balance` | `GET /v3/balance` |
 | Pricing | `price` | `GET /v3/price` |
-| Print jobs | `print_jobs`, `print_job`, `submit_print_job`, `update_print_job`, `delete_print_job` | `GET/POST /v3/printjobs`, `GET/PUT/DELETE /v3/printjobs/{id}` |
-| E-mail jobs | `email_jobs`, `email_job`, `submit_email_job`, `update_email_job`, `delete_email_job` | `GET/POST /v3/emailjobs`, `GET/PUT/DELETE /v3/emailjobs/{id}` |
+| Print jobs | `print_jobs`, `print_job`, `submit_print_job`, `update_print_job`, `delete_print_job`, `cancel_batch` | `GET/POST /v3/printjobs`, `GET/PUT/DELETE /v3/printjobs/{id}` |
+| E-mail jobs | `email_jobs`, `email_job`, `submit_email_job`, `update_email_job`, `delete_email_job`, `cancel_batch` | `GET/POST /v3/emailjobs`, `GET/PUT/DELETE /v3/emailjobs/{id}` |
 | Journal | `journal` | `GET /v3/journal` |
 | Ledger | `transactions` | `GET /v3/transactions` |
 | Invoices | `invoices`, `invoice` | `GET /v3/invoices`, `GET /v3/invoices/{id}` |
@@ -99,6 +99,24 @@ decodes every fixture.
 | `id` as a JSON string | **unverified** | accepted, documented as a number |
 | `per_page` other than 15 | **unverified** | parsed, never sent |
 | camelCase keys | **unverified** | not in the document; accepted so a parallel surface cannot break decoding |
+| Cancellation window and batch policy | **verified** | single-job `DELETE` within 15 minutes after transmission, pp. 18 and 25; `cancel_batch` is a bounded client-side sequence |
+
+### Cancellation in one payload
+
+The provider has no bulk-delete endpoint: a print or e-mail job is deleted with
+one `DELETE /v3/{printjobs,emailjobs}/{id}`, only within the first 15 minutes
+after transmission (pp. 18 and 25). `Client::cancel_batch` supports the
+provider-compatible operation by taking a validated `CancellationBatch`, sending
+at most one documented `DELETE` at a time, and returning a result for every
+input job. The batch is capped at 120 entries so it spends at most one minute
+of the documented 120-requests-per-minute budget. It does no retrying or
+sleeping.
+
+Each entry carries the monotonic `Instant` captured at transmission, because the
+provider's `created_at` has no documented timezone. A closed window is reported
+as `CancellationOutcome::WindowClosed` before any request is sent. Failures are
+per-job `CancellationOutcome::Failed(Error)` values; later independent jobs are
+still attempted.
 
 ### Why the checksum is MD5
 
@@ -118,7 +136,6 @@ would be the failure mode this extraction exists to avoid:
   `letter` object; there is no upload-then-reference flow.
 - **Status list endpoint.** Status arrives with the job (`GET /v3/printjobs/{id}`)
   and there is no status vocabulary beyond the seven values above.
-- **Bulk cancel.** Cancellation is `DELETE` on a single job, within 15 minutes.
 - **Idempotency keys.** The API has none. `notice` (max 255 characters) is free
   text, not an index.
 - **PDF rendering.** The recipient address is rendered into the PDF by the
@@ -231,7 +248,7 @@ silently fix in the product repo (they are reported there):
 ## Testing
 
 ```
-cargo test --all-features     # 464 tests: fixtures, edge matrix, properties, 32-task concurrency, 295 doctests
+cargo test --all-features     # 726 tests: fixtures, edge matrix, properties, batch cancellation, concurrency, doctests
 cargo test --no-default-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_envelope
