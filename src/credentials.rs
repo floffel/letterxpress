@@ -186,27 +186,30 @@ impl Credentials {
     /// let credentials = Credentials::new("kunde", "abc123", Mode::Live)?;
     /// assert_eq!(credentials.username(), "kunde");
     /// assert!(credentials.mode().is_billable());
+    ///
+    /// // Borrowed and owned values are both accepted; validation runs on the
+    /// // trimmed borrowed input before the credential is copied once.
+    /// let owned = Credentials::new(String::from(" kunde "), String::from(" abc123 "), Mode::Test)?;
+    /// assert_eq!(owned.username(), "kunde");
+    ///
     /// assert!(Credentials::new("kunde\u{2028}name", "abc123", Mode::Live).is_err());
     /// assert!(Credentials::new("kunde", "abc\u{202E}123", Mode::Live).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn new(
-        username: impl Into<String>,
-        apikey: impl Into<String>,
+        username: impl AsRef<str>,
+        apikey: impl AsRef<str>,
         mode: Mode,
     ) -> Result<Self, Error> {
-        let username = username.into();
-        let mut apikey = Protected::new(apikey.into());
-
-        let username = username.trim();
-        trim_in_place(apikey.inner_mut());
+        let username = username.as_ref().trim();
+        let apikey = apikey.as_ref().trim();
 
         validate_token("credentials.username", username, MAX_USERNAME_LEN)?;
-        validate_token("credentials.apikey", apikey.risky_ref(), MAX_APIKEY_LEN)?;
+        validate_token("credentials.apikey", apikey, MAX_APIKEY_LEN)?;
 
         Ok(Self {
             username: username.to_owned(),
-            apikey,
+            apikey: Protected::new(apikey.to_owned()),
             mode,
         })
     }
@@ -262,18 +265,16 @@ impl Credentials {
     }
 }
 
-/// Trims in place so the caller-provided allocation becomes the protected one.
-fn trim_in_place(value: &mut String) {
-    let trimmed_len = value.trim().len();
-    let start = value.len() - value.trim_start().len();
-    value.drain(..start);
-    value.truncate(trimmed_len);
-}
-
 /// Rejects empty, oversized, and non-ASCII-printable values.
 fn validate_token(field: &'static str, value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::invalid(field, "must not be empty"));
+    }
+    if value.len() > max {
+        return Err(Error::invalid(
+            field,
+            format!("must be at most {max} characters"),
+        ));
     }
     if !value
         .chars()
@@ -282,12 +283,6 @@ fn validate_token(field: &'static str, value: &str, max: usize) -> Result<(), Er
         return Err(Error::invalid(
             field,
             "must contain only ASCII graphic characters or spaces",
-        ));
-    }
-    if value.len() > max {
-        return Err(Error::invalid(
-            field,
-            format!("must be at most {max} characters"),
         ));
     }
     Ok(())
@@ -334,6 +329,19 @@ mod tests {
         assert!(validate_token("field", "abc", 3).is_ok());
         assert!(validate_token("field", "abc def", 7).is_ok());
         assert!(validate_token("field", "!\"#$%&'()*+,-./", 16).is_ok());
+    }
+
+    #[test]
+    fn token_validation_checks_the_byte_bound_before_characters() {
+        let oversized_non_ascii = "ä".repeat(6);
+        let error = validate_token("field", &oversized_non_ascii, 5)
+            .expect_err("six bytes exceed the bound");
+
+        assert!(matches!(
+            &error,
+            Error::Validation { field: "field", message }
+                if message == "must be at most 5 characters"
+        ));
     }
 
     #[test]
@@ -448,7 +456,8 @@ mod tests {
 
     #[test]
     fn credential_length_limits_accept_exact_and_reject_one_past() {
-        assert!(Credentials::new("u".repeat(MAX_USERNAME_LEN), "k", Mode::Test).is_ok());
+        let username_at_limit = format!(" {} ", "u".repeat(MAX_USERNAME_LEN));
+        assert!(Credentials::new(username_at_limit, "k", Mode::Test).is_ok());
         assert!(matches!(
             Credentials::new("u".repeat(MAX_USERNAME_LEN + 1), "k", Mode::Test),
             Err(Error::Validation {
@@ -457,7 +466,8 @@ mod tests {
             })
         ));
 
-        assert!(Credentials::new("u", "k".repeat(MAX_APIKEY_LEN), Mode::Test).is_ok());
+        let apikey_at_limit = format!(" {} ", "k".repeat(MAX_APIKEY_LEN));
+        assert!(Credentials::new("u", apikey_at_limit, Mode::Test).is_ok());
         assert!(matches!(
             Credentials::new("u", "k".repeat(MAX_APIKEY_LEN + 1), Mode::Test),
             Err(Error::Validation {
