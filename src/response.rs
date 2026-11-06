@@ -154,6 +154,10 @@ impl Envelope {
 /// a literal `null` body. Endpoints that require a payload still report
 /// [`Error::MissingField`] from their own decoding step.
 ///
+/// A 2xx body whose top level is an array, string, number or boolean is not an
+/// envelope and reports [`Error::UnexpectedShape`]. Status classification runs
+/// first, so an error response still reports its HTTP or body-level status.
+///
 /// ```
 /// use letterxpress::transport::Response;
 ///
@@ -175,6 +179,13 @@ impl Envelope {
 ///
 /// let empty = letterxpress::parse_envelope("DELETE /v3/printjobs/{id}", Response::new(204, std::iter::empty(), Vec::new()))?;
 /// assert!(empty.data().is_none());
+///
+/// let list = Response::json_response(200, r#"[{"id":1},{"id":2}]"#);
+/// let error = letterxpress::parse_envelope("GET /v3/emailjobs", list).unwrap_err();
+/// assert!(matches!(error, letterxpress::Error::UnexpectedShape { .. }));
+///
+/// let null = letterxpress::parse_envelope("GET /v3/balance", Response::json_response(200, "null"))?;
+/// assert!(null.data().is_none());
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
 #[allow(clippy::needless_pass_by_value)]
@@ -197,7 +208,23 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
         return Err(error);
     }
 
-    let body = body.unwrap_or(Value::Null);
+    // Status classification above is authoritative; only now is the successful
+    // body's shape checked. An object is the documented envelope, and null is
+    // the same no-payload answer as an empty body.
+    let body = match body {
+        Some(Value::Object(map)) => Value::Object(map),
+        Some(Value::Null) | None => Value::Null,
+        Some(other) => {
+            return Err(Error::UnexpectedShape {
+                endpoint,
+                message: format!(
+                    "expected an object or null, got {}",
+                    json_shape_name(&other)
+                ),
+                source: None,
+            });
+        }
+    };
     Ok(Envelope {
         http_status,
         status: body_status,
@@ -282,6 +309,18 @@ fn body_error(status: Option<u16>, message: Option<&str>, response: &Response) -
             message: text,
         }),
         _ => None,
+    }
+}
+
+/// Names a JSON shape for a diagnostic message.
+fn json_shape_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
