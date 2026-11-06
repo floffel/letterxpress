@@ -198,11 +198,15 @@ pub(crate) use response::decode_base64;
 pub fn md5_hex(bytes: &[u8]) -> String {
     use md5::Digest as _;
 
-    let digest = md5::Md5::digest(bytes);
-    let mut hex = String::with_capacity(32);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
+    hex::encode(md5::Md5::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::md5_hex;
+
+    #[test]
+    fn md5_hex_is_the_lowercase_documented_digest() {
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
     }
-    hex
 }
