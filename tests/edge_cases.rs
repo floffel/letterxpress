@@ -106,6 +106,60 @@ async fn whitespace_only_body_behaves_like_an_empty_one() {
     ));
 }
 
+#[test]
+fn non_object_success_bodies_are_unexpected_shape() {
+    // The shape boundary: a JSON object is a valid envelope, and a literal
+    // null is the same no-payload answer as an empty body.
+    for body in ["{}", "null"] {
+        let envelope =
+            letterxpress::parse_envelope("GET /v3/emailjobs", Response::json_response(200, body))
+                .unwrap_or_else(|error| {
+                    panic!("{body:?} must remain a valid empty envelope: {error}")
+                });
+        assert!(envelope.data().is_none(), "{body:?}");
+        assert!(envelope.pagination().is_none(), "{body:?}");
+    }
+
+    // Just outside: every other top-level JSON shape is not an envelope. It
+    // must not decode as one with no data and no pagination.
+    for body in [r#"[{"id":1},{"id":2}]"#, r#""ok""#, "42", "true"] {
+        let error =
+            letterxpress::parse_envelope("GET /v3/emailjobs", Response::json_response(200, body))
+                .expect_err("a non-object success body is not an envelope");
+
+        assert!(
+            matches!(
+                &error,
+                Error::UnexpectedShape {
+                    endpoint: "GET /v3/emailjobs",
+                    source: None,
+                    ..
+                }
+            ),
+            "{body:?}: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("expected an object"),
+            "{body:?}: {error}"
+        );
+        assert!(
+            !error.is_retryable_for(true),
+            "{body:?}: the same bytes fail again"
+        );
+    }
+}
+
+#[test]
+fn http_status_classification_precedes_success_shape_validation() {
+    let error = letterxpress::parse_envelope(
+        "GET /v3/emailjobs",
+        Response::json_response(401, r#"[{"id":1}]"#),
+    )
+    .expect_err("the HTTP status is authoritative");
+
+    assert!(matches!(error, Error::Unauthorized { .. }), "{error:?}");
+}
+
 #[tokio::test]
 async fn bodiless_deletes_succeed_for_empty_and_whitespace_bodies() {
     for (status, body) in [(204, ""), (200, ""), (200, " \n\t")] {
