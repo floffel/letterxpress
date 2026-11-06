@@ -72,7 +72,7 @@ reliable error signal:
 | 404 | Not Found | verified |
 | 405 | Method Not Allowed | verified |
 | 500 | Internal Server Error | verified |
-| 429 | (not listed) rate-limit rejection | **unverified** — the limit is documented (p. 3), the status code is not. The crate maps 429 to `Error::RateLimited` and honours `Retry-After` when present, in whole seconds and clamped to `MAX_RETRY_AFTER` (5 min) — the format and the ceiling are the crate's own policy, not documented by the provider. |
+| 429 | (not listed) rate-limit rejection | **unverified** — the limit is documented (p. 3), the status code is not. The crate maps 429 to `Error::RateLimited` and honours `Retry-After` when present, in whole seconds and clamped to `MAX_RETRY_AFTER` (1 hour) — the format and the ceiling are the crate's own policy, not documented by the provider. |
 
 ## 3. The `letter` object
 

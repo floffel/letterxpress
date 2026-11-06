@@ -1058,7 +1058,7 @@ proptest! {
     fn the_retry_decision_never_outruns_the_request_it_belongs_to(
         kind in transport_kind_strategy(),
         status in 100u16..=599,
-        retry_after in proptest::option::of(0u64..=86_400u64),
+        retry_after in proptest::option::of(any::<u64>()),
     ) {
         let retry_after = retry_after.map(Duration::from_secs);
         for error in arbitrary_errors(kind, status, retry_after) {
