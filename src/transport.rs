@@ -14,7 +14,9 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::future::poll_fn;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::Poll;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -500,9 +502,20 @@ impl MockTransport {
 
 impl Transport for MockTransport {
     async fn execute(&self, request: Request) -> Result<Response> {
-        // The script resolves immediately, but the call is still an await point
-        // so the mock behaves like the real transports under a scheduler.
-        std::future::ready(()).await;
+        // Suspend exactly once before consuming the script. This gives a
+        // scheduler a real chance to run another task without requiring Tokio
+        // in builds where the mock is the only transport.
+        let mut suspended = false;
+        poll_fn(|context| {
+            if suspended {
+                Poll::Ready(())
+            } else {
+                suspended = true;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
         let next = {
             let mut state = lock(&self.state);
             state
@@ -950,6 +963,25 @@ fn describe_reqwest_error(error: reqwest::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    #[test]
+    fn mock_execute_is_pending_before_it_consumes_the_script() {
+        let mock = MockTransport::new([Ok(Response::json_response(200, "{}"))]);
+        let mut call =
+            Box::pin(mock.execute(Request::new(Method::Get, "https://example.test/", None)));
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(mock.remaining(), 1, "a suspended call must not consume");
+
+        assert!(matches!(
+            call.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(mock.remaining(), 0);
+    }
 
     #[test]
     fn headers_are_case_insensitive() {
