@@ -120,6 +120,55 @@ fn every_job_status_is_classified() {
 }
 
 #[test]
+fn unknown_wire_values_normalize_case_padding_and_hash_equally() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn assert_equivalent<T: std::fmt::Debug + Eq + Hash>(left: &T, right: &T) {
+        assert_eq!(left, right);
+
+        let hash = |value: &T| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(left), hash(right));
+    }
+
+    let expected = JobStatus::from_wire("foo");
+    for raw in ["FOO", "foo", " Foo ", "\tFoo\n"] {
+        assert_equivalent(&JobStatus::from_wire(raw), &expected);
+    }
+    assert_eq!(JobStatus::from_wire("FOO"), JobStatus::from_wire("foo"));
+
+    assert_equivalent(&Color::from_wire(" A1 "), &Color::Other("a1".to_owned()));
+    assert_equivalent(
+        &PrintMode::from_wire(" Booklet "),
+        &PrintMode::Other("booklet".to_owned()),
+    );
+    assert_equivalent(
+        &Shipping::from_wire(" Mars "),
+        &Shipping::Other("mars".to_owned()),
+    );
+    assert_equivalent(
+        &Registered::from_wire(" R9 "),
+        &Registered::Other("r9".to_owned()),
+    );
+    assert_equivalent(
+        &EmailOption::from_wire(" FAX "),
+        &EmailOption::Other("fax".to_owned()),
+    );
+}
+
+#[test]
+fn unknown_wire_values_preserve_non_ascii_characters() {
+    let status = JobStatus::from_wire("  ÄRGER  ");
+    assert_eq!(status.as_str(), "Ärger");
+    assert_eq!(status, JobStatus::from_wire("Ärger"));
+    assert_ne!(status, JobStatus::from_wire("ärger"));
+}
+
+#[test]
 fn request_side_filters_are_closed_and_parseable() {
     for filter in JobFilter::ALL {
         assert_eq!(filter.to_string(), filter.as_str());

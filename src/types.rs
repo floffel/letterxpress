@@ -1,9 +1,10 @@
 //! Wire vocabularies: the closed value sets the provider documents, plus a
 //! carry-all for everything else.
 //!
-//! Decoding is deliberately permissive: an unknown value is kept verbatim in
-//! `Other(String)` instead of failing the whole response, so a new provider
-//! status cannot take a client offline. Encoding is strict for request-side
+//! Decoding is deliberately permissive: an unknown value is carried in
+//! `Other(String)` after trimming and ASCII-lowercasing instead of failing the
+//! whole response, so a new provider status cannot take a client offline.
+//! Encoding is strict for request-side
 //! enums ([`JobFilter`], [`TransactionFilter`], [`JournalType`]) — those have
 //! no `Other`, because guessing a filter value would silently return the wrong
 //! result set.
@@ -35,18 +36,21 @@ macro_rules! wire_enum {
                 $(#[$variant_meta])*
                 $variant,
             )+
-            /// A value this crate does not model yet, kept verbatim.
+            /// A value this crate does not model yet, with surrounding
+            /// whitespace trimmed and ASCII letters lowercased.
+            ///
+            /// Non-ASCII characters are preserved as sent.
             ///
             /// ```
             #[doc = concat!("# use letterxpress::", stringify!($name), ";")]
-            #[doc = concat!("let value = <", stringify!($name), ">::from_wire(\"something-new\");")]
+            #[doc = concat!("let value = <", stringify!($name), ">::from_wire(\"  Something-New  \");")]
             /// assert_eq!(value.as_str(), "something-new");
             /// ```
             Other(String),
         }
 
         impl $name {
-            /// The documented wire spelling, or the raw value for
+            /// The documented wire spelling, or the normalized carried value for
             /// [`Self::Other`].
             ///
             /// ```
@@ -61,13 +65,17 @@ macro_rules! wire_enum {
                 }
             }
 
-            /// Parses a wire value, case-insensitively and trimming
-            /// whitespace. Unknown values become [`Self::Other`].
+            /// Parses a wire value, matching case-insensitively after trimming
+            /// whitespace. Unknown values become [`Self::Other`] with the
+            /// surrounding whitespace removed and ASCII letters lowercased;
+            /// non-ASCII characters are preserved.
             ///
             /// ```
             #[doc = concat!("# use letterxpress::", stringify!($name), ";")]
-            #[doc = concat!("let parsed = <", stringify!($name), ">::from_wire(\"  unknown-value  \");")]
+            #[doc = concat!("let parsed = <", stringify!($name), ">::from_wire(\"  Unknown-Value  \");")]
             #[doc = concat!("assert_eq!(parsed.as_str(), \"unknown-value\");")]
+            #[doc = concat!("let unicode = <", stringify!($name), ">::from_wire(\"  ÄRGER  \");")]
+            #[doc = concat!("assert_eq!(unicode.as_str(), \"Ärger\");")]
             /// ```
             #[must_use]
             pub fn from_wire(raw: &str) -> Self {
@@ -80,7 +88,7 @@ macro_rules! wire_enum {
                         return Self::$variant;
                     }
                 )+
-                Self::Other(normalized.to_string())
+                Self::Other(normalized.to_ascii_lowercase())
             }
         }
 
@@ -254,14 +262,15 @@ wire_enum! {
     ///
     /// The provider documents no state machine, only this vocabulary (from the
     /// `filter` table and the examples). Both spellings of "canceled" are
-    /// accepted; anything unknown is carried through.
+    /// accepted; anything unknown is carried through after trimming and
+    /// ASCII-lowercasing.
     ///
     /// ```
     /// use letterxpress::JobStatus;
     ///
     /// assert_eq!(JobStatus::from_wire("done"), JobStatus::Done);
     /// assert_eq!(JobStatus::from_wire("cancelled"), JobStatus::Canceled);
-    /// assert_eq!(JobStatus::from_wire("reticulating"), JobStatus::Other("reticulating".into()));
+    /// assert_eq!(JobStatus::from_wire(" Reticulating "), JobStatus::Other("reticulating".into()));
     /// assert!(JobStatus::Canceled.is_terminal());
     /// assert!(!JobStatus::Queue.is_terminal());
     /// ```
