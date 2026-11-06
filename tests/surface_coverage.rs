@@ -293,6 +293,82 @@ fn request_side_filters_are_closed_and_parseable() {
 }
 
 #[test]
+fn request_side_filters_keep_the_custom_error_contract() {
+    let job_error = "everything"
+        .parse::<JobFilter>()
+        .expect_err("unknown filter");
+    assert!(matches!(
+        job_error,
+        Error::Validation {
+            field: "filter",
+            ..
+        }
+    ));
+
+    let transaction_error = "refunds"
+        .parse::<TransactionFilter>()
+        .expect_err("unknown transaction filter");
+    assert!(matches!(
+        transaction_error,
+        Error::Validation {
+            field: "filter",
+            ..
+        }
+    ));
+
+    let journal_error = "cheque"
+        .parse::<JournalType>()
+        .expect_err("unknown journal type");
+    assert!(matches!(
+        journal_error,
+        Error::Validation {
+            field: "filter.type",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn every_wire_alias_displays_canonically_in_any_case_and_padding() {
+    for (raw, expected, canonical) in [
+        ("1", Color::BlackAndWhite, "1"),
+        ("bw", Color::BlackAndWhite, "1"),
+        ("black_and_white", Color::BlackAndWhite, "1"),
+        ("4", Color::Color, "4"),
+        ("colour", Color::Color, "4"),
+        ("full_color", Color::Color, "4"),
+    ] {
+        let padded = format!(" \t{}\r\n", raw.to_ascii_uppercase());
+        let parsed = Color::from_wire(&padded);
+        assert_eq!(parsed, expected, "{padded:?}");
+        assert_eq!(parsed.to_string(), canonical, "{padded:?}");
+        assert_eq!(parsed.as_ref(), canonical, "{padded:?}");
+    }
+
+    for (raw, expected) in [
+        ("r1", Registered::EinschreibenEinwurf),
+        ("r2", Registered::Einschreiben),
+    ] {
+        let padded = format!(" \t{}\r\n", raw.to_ascii_uppercase());
+        let parsed = Registered::from_wire(&padded);
+        assert_eq!(parsed, expected, "{padded:?}");
+        assert_eq!(parsed.to_string(), raw, "{padded:?}");
+        assert_eq!(parsed.as_ref(), raw, "{padded:?}");
+    }
+
+    for (raw, expected) in [
+        ("canceled", JobStatus::Canceled),
+        ("cancelled", JobStatus::Canceled),
+    ] {
+        let padded = format!(" \t{}\r\n", raw.to_ascii_uppercase());
+        let parsed = JobStatus::from_wire(&padded);
+        assert_eq!(parsed, expected, "{padded:?}");
+        assert_eq!(parsed.to_string(), "canceled", "{padded:?}");
+        assert_eq!(parsed.as_ref(), "canceled", "{padded:?}");
+    }
+}
+
+#[test]
 fn request_side_filter_lists_contain_every_variant() {
     assert_eq!(
         JobFilter::iter().collect::<Vec<_>>(),

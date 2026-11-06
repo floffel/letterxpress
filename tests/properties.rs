@@ -12,9 +12,9 @@ use std::time::Duration;
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    AmbiguousKind, BankForm, Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode,
-    Money, PrintMode, Registered, Shipping, TransportKind, MAX_BANK_AMOUNT_CHARS, MAX_NOTICE_CHARS,
-    MAX_PURPOSE_CHARS, MAX_RETRY_AFTER,
+    AmbiguousKind, BankForm, Color, Credentials, Date, EmailOption, Error, JobFilter, JobStatus,
+    JournalType, Letter, Mode, Money, PrintMode, Registered, Shipping, TransactionFilter,
+    TransportKind, MAX_BANK_AMOUNT_CHARS, MAX_NOTICE_CHARS, MAX_PURPOSE_CHARS, MAX_RETRY_AFTER,
 };
 use proptest::prelude::*;
 
@@ -347,6 +347,101 @@ proptest! {
         padded in prop::sample::select(vec!["done", "DONE", " Done ", "done\t"]).prop_map(String::from)
     ) {
         prop_assert_eq!(JobStatus::from_wire(&padded), JobStatus::Done);
+    }
+
+    /// Every documented request-filter spelling and alias survives arbitrary
+    /// ASCII case and surrounding ASCII whitespace. The public `FromStr`
+    /// contract remains the crate's typed `Error`-based parser.
+    #[test]
+    fn request_filter_round_trips_survive_case_and_padding(
+        mask in any::<u64>(),
+        left in "[ \\t\\n\\r]{0,8}",
+        right in "[ \\t\\n\\r]{0,8}",
+    ) {
+        for raw in ["queue", "hold", "done", "canceled", "draft"] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = input.parse::<JobFilter>();
+            prop_assert!(parsed.is_ok(), "parsing {input:?}: {parsed:?}");
+            if let Ok(parsed) = parsed {
+                prop_assert_eq!(parsed.to_string(), parsed.as_str());
+                let static_str: &'static str = parsed.into();
+                prop_assert_eq!(static_str, parsed.as_str());
+            }
+        }
+        for raw in ["payins", "payouts", "printjobs"] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = input.parse::<TransactionFilter>();
+            prop_assert!(parsed.is_ok(), "parsing {input:?}: {parsed:?}");
+            if let Ok(parsed) = parsed {
+                prop_assert_eq!(parsed.to_string(), parsed.as_str());
+                let static_str: &'static str = parsed.into();
+                prop_assert_eq!(static_str, parsed.as_str());
+            }
+        }
+        for raw in ["print", "maildirect", "mailsecure", "mailplus"] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = input.parse::<JournalType>();
+            prop_assert!(parsed.is_ok(), "parsing {input:?}: {parsed:?}");
+            if let Ok(parsed) = parsed {
+                prop_assert_eq!(parsed.to_string(), parsed.as_str());
+                let static_str: &'static str = parsed.into();
+                prop_assert_eq!(static_str, parsed.as_str());
+            }
+        }
+    }
+
+    /// `from_wire` keeps every canonical value and alias, in any ASCII case and
+    /// with surrounding whitespace, while display uses the canonical spelling.
+    /// The property covers the macro-backed enums one at a time so every alias
+    /// is exercised instead of sampling only the canonical values.
+    #[test]
+    fn wire_enum_round_trips_survive_case_and_padding(
+        mask in any::<u64>(),
+        left in "[ \\t\\n\\r]{0,8}",
+        right in "[ \\t\\n\\r]{0,8}",
+    ) {
+        for (raw, expected) in [("1", Color::BlackAndWhite), ("bw", Color::BlackAndWhite), ("black_and_white", Color::BlackAndWhite), ("4", Color::Color), ("colour", Color::Color), ("full_color", Color::Color)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = Color::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
+        for (raw, expected) in [("simplex", PrintMode::Simplex), ("duplex", PrintMode::Duplex)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = PrintMode::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
+        for (raw, expected) in [("national", Shipping::National), ("international", Shipping::International), ("auto", Shipping::Auto)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = Shipping::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
+        for (raw, expected) in [("r1", Registered::EinschreibenEinwurf), ("r2", Registered::Einschreiben)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = Registered::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
+        for (raw, expected) in [("maildirect", EmailOption::MailDirect), ("mailplus", EmailOption::MailPlus), ("mailsecure", EmailOption::MailSecure)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = EmailOption::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
+        for (raw, expected) in [("queue", JobStatus::Queue), ("hold", JobStatus::Hold), ("done", JobStatus::Done), ("canceled", JobStatus::Canceled), ("cancelled", JobStatus::Canceled), ("draft", JobStatus::Draft), ("sent", JobStatus::Sent), ("success", JobStatus::Success)] {
+            let input = padded_case(raw, mask, &left, &right);
+            let parsed = JobStatus::from_wire(&input);
+            prop_assert_eq!(&parsed, &expected, "input {:?}", input);
+            prop_assert_eq!(parsed.to_string(), parsed.as_str());
+            prop_assert_eq!(parsed.as_ref(), parsed.as_str());
+        }
     }
 
     /// Every validated date formats as `yyyy-mm-dd` and round-trips through the
@@ -887,6 +982,20 @@ proptest! {
             }
         }
     }
+}
+
+fn padded_case(raw: &str, mask: u64, left: &str, right: &str) -> String {
+    let mut value = String::with_capacity(left.len() + raw.len() + right.len());
+    value.push_str(left);
+    value.extend(raw.chars().enumerate().map(|(index, character)| {
+        if mask & (1 << (index % u64::BITS as usize)) == 0 {
+            character
+        } else {
+            character.to_ascii_uppercase()
+        }
+    }));
+    value.push_str(right);
+    value
 }
 
 fn group_digits(digits: &str, separator: char) -> String {

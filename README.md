@@ -268,7 +268,8 @@ cargo +nightly fuzz run date_parse
   submit, unknown enum values, camelCase keys.
 - `tests/properties.rs` (proptest) pins the invariants: checksum = MD5 of the
   base64 text, base64 round-trip, notice limits, money arithmetic, date
-  ordering, "the response parser never panics".
+  ordering, "the response parser never panics", and every documented enum
+  spelling and alias under arbitrary ASCII case and surrounding whitespace.
 - `tests/concurrency.rs` hammers one client from 32 tasks: one request per
   submit, no interleaved answers.
 - `fuzz/fuzz_targets/parse_envelope.rs` feeds arbitrary bytes through the
@@ -279,6 +280,11 @@ cargo +nightly fuzz run date_parse
 
 Coverage is measured without the `http` feature: the reqwest adapter is the only
 code that needs a socket, and everything else runs against the mock transport.
+
+The closed request enums derive their display and static-string conversions
+with `strum`. Their `FromStr` implementations stay hand-written on purpose:
+they trim surrounding whitespace and return the crate's typed `Error`, preserving
+the established parser contract rather than exposing `strum`'s parse error.
 
 ## License
 
