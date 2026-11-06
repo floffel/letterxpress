@@ -128,10 +128,18 @@ proptest! {
         let expected_username = is_valid_credential_token(&username, 256);
         let expected_apikey = is_valid_credential_token(&apikey, 512);
 
-        prop_assert_eq!(
-            Credentials::new(&username, "key", Mode::Test).is_ok(),
-            expected_username
-        );
+        let borrowed_username = Credentials::new(&username, "key", Mode::Test);
+        prop_assert_eq!(borrowed_username.is_ok(), expected_username);
+        if let Ok(credentials) = borrowed_username {
+            prop_assert_eq!(credentials.username(), username.trim());
+        }
+
+        let owned_username = Credentials::new(username.clone(), "key", Mode::Test);
+        prop_assert_eq!(owned_username.is_ok(), expected_username);
+        if let Ok(credentials) = owned_username {
+            prop_assert_eq!(credentials.username(), username.trim());
+        }
+
         prop_assert_eq!(
             Credentials::new("user", &apikey, Mode::Test).is_ok(),
             expected_apikey
