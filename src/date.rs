@@ -154,21 +154,22 @@ impl Date {
         self > *other
     }
 
-    /// Days since 1970-01-01, proleptic Gregorian. Used for ordering tests and
-    /// for cheap range checks.
+    /// Days since 1970-01-01, valid for `1970-01-01..=9999-12-31`, the range
+    /// [`Date::new`] accepts. Used for ordering tests and cheap range checks.
     ///
     /// ```
     /// use letterxpress::Date;
     ///
     /// assert_eq!(Date::new(1970, 1, 1).unwrap().days_since_epoch(), 0);
     /// assert_eq!(Date::new(1970, 1, 2).unwrap().days_since_epoch(), 1);
+    /// assert_eq!(Date::new(9999, 12, 31).unwrap().days_since_epoch(), 2_932_896);
     /// ```
     #[must_use]
     pub fn days_since_epoch(self) -> i64 {
-        // Days from civil (Howard Hinnant's algorithm), valid for any
-        // proleptic Gregorian date.
+        // Days from civil (Howard Hinnant's algorithm) for 1970-01-01 through
+        // 9999-12-31. The year and era are non-negative throughout this range.
         let year = i64::from(self.year) - i64::from(self.month <= 2);
-        let era = if year >= 0 { year } else { year - 399 } / 400;
+        let era = year / 400;
         let year_of_era = year - era * 400;
         let month = i64::from(self.month);
         let day = i64::from(self.day);
@@ -255,6 +256,28 @@ mod tests {
             "9999-12-31",
         ] {
             assert!(Date::parse(text).is_ok(), "expected {text:?} to parse");
+        }
+    }
+
+    #[test]
+    fn days_since_epoch_and_ordering_are_stable_at_supported_bounds() {
+        let min = Date::new(1970, 1, 1).expect("minimum supported date");
+        let max = Date::new(9999, 12, 31).expect("maximum supported date");
+
+        assert_eq!(min.days_since_epoch(), 0);
+        assert_eq!(max.days_since_epoch(), 2_932_896);
+        assert_eq!(min.cmp(&max), Ordering::Less);
+        assert!(max.is_after(&min));
+        assert!(!min.is_after(&max));
+    }
+
+    #[test]
+    fn dates_outside_the_supported_domain_are_rejected() {
+        for (year, month, day) in [(1969, 12, 31), (10_000, 1, 1)] {
+            assert!(matches!(
+                Date::new(year, month, day),
+                Err(Error::Validation { field: "date", .. })
+            ));
         }
     }
 
