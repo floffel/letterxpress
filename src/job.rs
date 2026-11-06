@@ -1545,8 +1545,9 @@ impl Journal {
 /// ```
 ///
 /// A code that arrives as a number is not dropped either: it goes through the
-/// same [`Registered::from_wire`] path as a string, so it is carried verbatim
-/// like any other code this crate does not model.
+/// same [`Registered::from_wire`] path as a string, so it is normalized like
+/// any other code this crate does not model: surrounding whitespace is trimmed
+/// and ASCII letters are lowercased.
 ///
 /// ```
 /// use letterxpress::{PriceEcho, Registered};
@@ -1657,9 +1658,9 @@ impl PriceEcho {
 /// `null`, an empty string and a string of blanks all mean "not supplied" and
 /// leave whatever the specification priced untouched. Everything else goes
 /// through [`Registered`]'s own decoding rule, which reads a number as its
-/// string form and carries an unknown code verbatim; a token that is not a
-/// code at all fails the deserialiser instead of being reported as
-/// "not registered".
+/// string form and carries an unknown code after trimming and ASCII-lowercasing;
+/// a token that is not a code at all fails the deserialiser instead of being
+/// reported as "not registered".
 fn letter_registered(value: Option<&Value>) -> Result<Option<Registered>, serde_json::Error> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
@@ -2126,10 +2127,10 @@ mod tests {
         .unwrap();
         assert_eq!(echo.registered, Some(Registered::Einschreiben));
 
-        // An unknown string is carried verbatim, like any other wire code.
+        // An unknown string is normalized like any other wire code.
         let echo = PriceEcho::from_envelope(&json!({
             "specification": {"pages": 1},
-            "registered": " r7 ",
+            "registered": " R7 ",
         }))
         .unwrap();
         assert_eq!(echo.registered, Some(Registered::Other("r7".into())));
