@@ -686,9 +686,10 @@ impl BankForm {
     ///
     /// [`Error::Validation`] for an empty or over-long field (payee and
     /// purpose 27 characters, IBAN 34, BIC 11, amount 12), an IBAN or BIC with
-    /// characters outside `A-Z0-9`, or an amount that is not a plain decimal
-    /// no greater than `999999999.99`. Surrounding whitespace is removed from
-    /// every field before validation and serialisation.
+    /// characters outside `A-Z0-9`, a control character, or an amount that is
+    /// not a plain decimal no greater than `999999999.99`. Surrounding
+    /// whitespace is removed from every field before validation and
+    /// serialisation.
     ///
     /// ```
     /// use letterxpress::BankForm;
@@ -767,24 +768,49 @@ impl BankForm {
 
     /// Adds a second payment-reference line (27 characters).
     ///
+    /// This is available on a [`BankForm::generated`] value. A form included in
+    /// the PDF ignores every payment field at the provider, so setting one
+    /// there would be silently discarded.
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] on an over-long value.
+    /// [`Error::Validation`] when the value is empty after trimming, contains
+    /// a control character, or when this form was created with
+    /// [`BankForm::included_in_pdf`]. [`Error::TooLarge`] when the normalized
+    /// value exceeds 27 characters.
     ///
     /// ```
     /// use letterxpress::BankForm;
     ///
-    /// let form = BankForm::included_in_pdf().with_purpose2("Rechnung 4711")?;
-    /// assert_eq!(form.to_json()["purpose_of_payment2"], "Rechnung 4711");
+    /// let form = BankForm::generated(
+    ///     "A&O Fischer GmbH",
+    ///     "DE12500105170648489890",
+    ///     "INGDDEFFXXX",
+    ///     "81,00",
+    ///     "Rechnung 4711",
+    /// )?
+    /// .with_purpose2("KdNr. 4711")?;
+    /// assert_eq!(form.to_json()["purpose_of_payment2"], "KdNr. 4711");
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_purpose2(mut self, purpose2: impl Into<String>) -> Result<Self, Error> {
-        let purpose2 = purpose2.into();
-        check_chars(
+        if self.included {
+            return Err(Error::invalid(
+                "letter.bank_form.purpose_of_payment2",
+                "cannot be set when bank_form_included is 1; payment fields are ignored",
+            ));
+        }
+        let purpose2 = normalize_bank_field(
             "letter.bank_form.purpose_of_payment2",
-            &purpose2,
+            purpose2.into().as_str(),
             MAX_PURPOSE_CHARS,
         )?;
+        if purpose2.is_empty() {
+            return Err(Error::invalid(
+                "letter.bank_form.purpose_of_payment2",
+                "must not be empty",
+            ));
+        }
         self.purpose2 = Some(purpose2);
         Ok(self)
     }
@@ -1835,6 +1861,9 @@ pub(crate) fn validate_email(field: &'static str, value: &str) -> Result<(), Err
 }
 
 fn normalize_bank_field(field: &'static str, value: &str, max: usize) -> Result<String, Error> {
+    if value.chars().any(char::is_control) {
+        return Err(Error::invalid(field, "must not contain control characters"));
+    }
     let value = value.trim().to_owned();
     check_chars(field, &value, max)?;
     Ok(value)

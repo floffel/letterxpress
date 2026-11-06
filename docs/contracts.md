@@ -112,13 +112,13 @@ Source: p. 7–9 ("Letter-Objekt"). Minimal configuration, verbatim:
 | `backgrounds.base64_background_other_pages` | string | A4 portrait, one page | p. 8 | verified |
 | `terms_and_conditions.base64_terms` | string | A4 portrait, one page | p. 8 | verified |
 | `terms_and_conditions.terms_on_all_pages` | number | `0`, `1` | p. 8 | verified |
-| `bank_form.bank_form_included` | number | `0`, `1` | p. 8 | verified |
+| `bank_form.bank_form_included` | number | `0`, `1`; payment fields are ignored by the provider when `1` | p. 8 | verified |
 | `bank_form.payee` | string | max 27 characters, ignored when `bank_form_included = 1` | p. 8 | verified |
 | `bank_form.iban` | string | max 34 characters | p. 8 | verified |
 | `bank_form.bic` | string | max 11 characters | p. 8 | verified |
 | `bank_form.amount` | string | max 12 characters | p. 8 | verified |
 | `bank_form.purpose_of_payment` | string | max 27 characters | p. 8 | verified |
-| `bank_form.purpose_of_payment2` | string | max 27 characters | p. 8 | verified |
+| `bank_form.purpose_of_payment2` | string | max 27 characters, rejected when `bank_form_included = 1` | p. 8 | verified |
 | `notice` | string | free text, max 255 characters, stored for later retrieval | p. 8 | verified |
 | Recipient address | — | **There is no address field.** The address is rendered into the PDF. The only address on the wire is `items[].address` in a *response*. | p. 7–9 + absence | verified |
 | `subject` / `content` / `footer` (email job) | string | Only appear in `emailjobs` **responses**, derived from the PDF's white-code; not accepted as request input. | p. 20, p. 24 | verified (absence in request) |

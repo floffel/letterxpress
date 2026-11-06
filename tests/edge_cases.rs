@@ -1703,6 +1703,81 @@ fn bank_form_fields_respect_the_documented_limits() {
 }
 
 #[test]
+fn bank_form_purpose2_is_validated_and_never_silently_ignored() {
+    use letterxpress::{BankForm, Error, MAX_PURPOSE_CHARS};
+
+    let form = BankForm::generated(
+        "A",
+        "DE12500105170648489890",
+        "INGDDEFFXXX",
+        "81,00",
+        "Rechnung",
+    )
+    .expect("valid generated form");
+
+    let boundary = form
+        .clone()
+        .with_purpose2(format!(" {} ", "x".repeat(MAX_PURPOSE_CHARS)))
+        .expect("the documented character limit is inclusive");
+    assert_eq!(
+        boundary.to_json()["purpose_of_payment2"],
+        "x".repeat(MAX_PURPOSE_CHARS)
+    );
+
+    assert!(matches!(
+        form.clone()
+            .with_purpose2("x".repeat(MAX_PURPOSE_CHARS + 1)),
+        Err(Error::TooLarge {
+            field: "letter.bank_form.purpose_of_payment2",
+            len,
+            max: MAX_PURPOSE_CHARS,
+        }) if len == MAX_PURPOSE_CHARS + 1
+    ));
+
+    for invalid in ["", "   ", "a\u{0}b", "a\nb", "a\u{7f}b", "KdNr. 4711\n"] {
+        assert!(
+            matches!(
+                form.clone().with_purpose2(invalid),
+                Err(Error::Validation {
+                    field: "letter.bank_form.purpose_of_payment2",
+                    ..
+                })
+            ),
+            "{invalid:?} must be rejected"
+        );
+    }
+
+    let trimmed = form
+        .with_purpose2("  KdNr. 4711  ")
+        .expect("surrounding whitespace is normalized");
+    assert_eq!(trimmed.to_json()["purpose_of_payment2"], "KdNr. 4711");
+
+    assert!(matches!(
+        BankForm::included_in_pdf().with_purpose2("KdNr. 4711"),
+        Err(Error::Validation {
+            field: "letter.bank_form.purpose_of_payment2",
+            ..
+        })
+    ));
+
+    for invalid in ["A\u{0}", "A\nB", "A\u{7f}", "A\n"] {
+        assert!(matches!(
+            BankForm::generated(
+                invalid,
+                "DE12500105170648489890",
+                "INGDDEFFXXX",
+                "81,00",
+                "Rechnung",
+            ),
+            Err(Error::Validation {
+                field: "letter.bank_form.payee",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn credentials_fail_closed_and_never_leak_in_debug() {
     assert!(Credentials::new("", "key", Mode::Test).is_err());
     assert!(Credentials::new("user", "", Mode::Test).is_err());
