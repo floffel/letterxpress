@@ -19,7 +19,6 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if let Ok(money) = serde_json::from_str::<Money>(text) {
-        assert!(money.cents() >= 0);
         assert_eq!(Money::parse(&money.to_string()), Ok(money));
         let quoted = format!("\"{money}\"");
         assert_eq!(serde_json::from_str::<Money>(&quoted).ok(), Some(money));

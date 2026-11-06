@@ -12,8 +12,8 @@
 //! separator styles may appear together only when one is consistently used for
 //! groups of three and the other is the decimal mark. Mixed grouping styles,
 //! reused separators, trailing or duplicate separators, exponent notation, and
-//! a leading `+` are rejected rather than guessed. Amounts are nonnegative, so
-//! a nonzero leading `-` is reported as [`MoneyError::Negative`].
+//! a leading `+` are rejected rather than guessed. Negative amounts are valid:
+//! transaction-ledger debits use them, and the sign belongs to the saved cents.
 //!
 //! ```
 //! use letterxpress::Money;
@@ -26,19 +26,20 @@
 //! ```
 
 use std::fmt;
+use std::ops::Add;
 use std::str::FromStr;
 
-use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// A failure to construct or combine a nonnegative [`Money`] amount.
+/// A failure to construct or combine a [`Money`] amount.
 ///
 /// ```
 /// use letterxpress::{Money, MoneyError};
 ///
-/// assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
 /// assert_eq!(Money::from_euros(f64::NAN), Err(MoneyError::NotFinite));
 /// assert_eq!(
 ///     "1,234,56".parse::<Money>(),
@@ -57,13 +58,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum MoneyError {
-    /// The amount is below zero.
-    #[error("money amount must not be negative")]
-    Negative,
     /// The euro value is NaN or infinite.
     #[error("money amount must be finite")]
     NotFinite,
-    /// The amount cannot be represented as a nonnegative [`i64`] cent value.
+    /// The amount cannot be represented as an [`i64`] cent value.
     #[error("money amount is out of range for i64 cents")]
     OutOfRange,
     /// The amount has a shape that is not a plain decimal.
@@ -83,14 +81,15 @@ pub enum MoneyError {
     InvalidPrecision,
 }
 
-/// A nonnegative monetary amount in euro cents.
+/// A signed monetary amount in euro cents.
 ///
 /// ```
 /// use letterxpress::Money;
 ///
-/// assert_eq!(Money::from_cents(81)?.euros(), 0.81);
+/// assert_eq!(Money::from_cents(81).euros(), 0.81);
 /// assert_eq!(Money::default().cents(), 0);
 /// assert_eq!(Money::from_euros(2.5)?.cents(), 250);
+/// assert_eq!(Money::from_cents(-81).cents(), -81);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -106,69 +105,46 @@ impl Money {
     /// ```
     pub const ZERO: Self = Self { cents: 0 };
 
-    /// Wraps a nonnegative euro value, rounding half-up to cents.
+    /// Converts a euro value at the fallible boundary, rounding to cents.
     ///
     /// # Errors
     ///
-    /// [`MoneyError::NotFinite`] for NaN or infinity,
-    /// [`MoneyError::Negative`] for a negative value, and
+    /// [`MoneyError::NotFinite`] for NaN or infinity and
     /// [`MoneyError::OutOfRange`] when rounding to [`i64`] cents overflows.
+    /// Ties round away from zero; the sign is then stored exactly in cents.
     ///
     /// ```
     /// use letterxpress::{Money, MoneyError};
     ///
     /// assert_eq!(Money::from_euros(4.999)?.cents(), 500);
-    /// assert_eq!(Money::from_euros(-0.01), Err(MoneyError::Negative));
+    /// assert_eq!(Money::from_euros(-1.005)?.cents(), -101);
     /// assert_eq!(Money::from_euros(f64::INFINITY), Err(MoneyError::NotFinite));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     pub fn from_euros(euros: f64) -> Result<Self, MoneyError> {
         if !euros.is_finite() {
             return Err(MoneyError::NotFinite);
         }
-        if euros < 0.0 {
-            return Err(MoneyError::Negative);
-        }
-
-        let cents = euros * 100.0;
-        if !cents.is_finite() {
-            return Err(MoneyError::OutOfRange);
-        }
-
-        let rounded = cents.round();
-        // `i64::MAX as f64` rounds up to 2^63, so every representable value at
-        // or above that point is too large for an i64.
-        if rounded >= i64::MAX as f64 {
-            return Err(MoneyError::OutOfRange);
-        }
-
-        Ok(Self {
-            cents: rounded as i64,
-        })
+        let euros = Decimal::from_f64(euros).ok_or(MoneyError::OutOfRange)?;
+        let cents = euros.round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero)
+            * Decimal::ONE_HUNDRED;
+        let cents = i64::try_from(cents).map_err(|_| MoneyError::OutOfRange)?;
+        Ok(Self { cents })
     }
 
     /// Builds an amount from minor units.
     ///
-    /// # Errors
-    ///
-    /// [`MoneyError::Negative`] when `cents` is below zero. Zero and
-    /// [`i64::MAX`] are valid.
-    ///
     /// ```
-    /// use letterxpress::{Money, MoneyError};
+    /// use letterxpress::Money;
     ///
-    /// assert_eq!(Money::from_cents(68)?.euros(), 0.68);
-    /// assert_eq!(Money::from_cents(i64::MAX)?.cents(), i64::MAX);
-    /// assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// assert_eq!(Money::from_cents(68).euros(), 0.68);
+    /// assert_eq!(Money::from_cents(i64::MAX).cents(), i64::MAX);
+    /// assert_eq!(Money::from_cents(i64::MIN).cents(), i64::MIN);
+    /// assert_eq!(Money::from_cents(-1).cents(), -1);
     /// ```
-    pub const fn from_cents(cents: i64) -> Result<Self, MoneyError> {
-        if cents < 0 {
-            Err(MoneyError::Negative)
-        } else {
-            Ok(Self { cents })
-        }
+    #[must_use]
+    pub const fn from_cents(cents: i64) -> Self {
+        Self { cents }
     }
 
     /// The euro value, derived from the exact cent amount.
@@ -177,8 +153,7 @@ impl Money {
     /// use [`Money::cents`].
     ///
     /// ```
-    /// assert_eq!(letterxpress::Money::from_cents(67)?.euros(), 0.67);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// assert_eq!(letterxpress::Money::from_cents(67).euros(), 0.67);
     /// ```
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
@@ -186,11 +161,10 @@ impl Money {
         self.cents as f64 / 100.0
     }
 
-    /// The exact value in cents. It is never negative by invariant.
+    /// The exact signed value in cents.
     ///
     /// ```
-    /// assert_eq!(letterxpress::Money::from_cents(68)?.cents(), 68);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// assert_eq!(letterxpress::Money::from_cents(68).cents(), 68);
     /// ```
     #[must_use]
     pub const fn cents(self) -> i64 {
@@ -206,10 +180,10 @@ impl Money {
     /// ```
     /// use letterxpress::{Money, MoneyError};
     ///
-    /// let one = Money::from_cents(1)?;
+    /// let one = Money::from_cents(1);
     /// assert_eq!(Money::ZERO.checked_add(one)?.cents(), 1);
     /// assert_eq!(
-    ///     Money::from_cents(i64::MAX)?.checked_add(one),
+    ///     Money::from_cents(i64::MAX).checked_add(one),
     ///     Err(MoneyError::OutOfRange)
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -225,20 +199,20 @@ impl Money {
     ///
     /// # Errors
     ///
-    /// [`MoneyError::Negative`] when the result would be below zero.
+    /// [`MoneyError::OutOfRange`] when the signed difference overflows.
     ///
     /// ```
     /// use letterxpress::{Money, MoneyError};
     ///
-    /// let one = Money::from_cents(1)?;
+    /// let one = Money::from_cents(1);
     /// assert_eq!(one.checked_sub(one)?.cents(), 0);
-    /// assert_eq!(Money::ZERO.checked_sub(one), Err(MoneyError::Negative));
+    /// assert_eq!(Money::ZERO.checked_sub(one)?.cents(), -1);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub const fn checked_sub(self, rhs: Self) -> Result<Self, MoneyError> {
         match self.cents.checked_sub(rhs.cents) {
-            Some(cents) if cents >= 0 => Ok(Self { cents }),
-            _ => Err(MoneyError::Negative),
+            Some(cents) => Ok(Self { cents }),
+            None => Err(MoneyError::OutOfRange),
         }
     }
 
@@ -251,7 +225,7 @@ impl Money {
     /// ```
     /// use letterxpress::Money;
     ///
-    /// let gross = Money::from_cents(68)?.checked_add(Money::from_cents(13)?)?;
+    /// let gross = Money::from_cents(68).checked_add(Money::from_cents(13))?;
     /// assert_eq!(gross.cents(), 81);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -269,12 +243,9 @@ impl Money {
         self.cents == 0
     }
 
-    /// Parses a nonnegative euro amount using the separator rules documented
-    /// on [`Money`].
-    ///
-    /// Leading and trailing whitespace is ignored. A leading `-` is parsed so
-    /// that a nonzero negative amount is reported as [`MoneyError::Negative`];
-    /// negative zero is zero. A leading `+`, exponent notation, underscores,
+    /// Parses a signed euro amount using the separator rules documented on
+    /// [`Money`]. Leading and trailing whitespace is ignored. A leading `-`
+    /// gives a negative amount; a leading `+`, exponent notation, underscores,
     /// and non-ASCII digits are rejected. Every rejection is terminal: the
     /// same text always produces the same error, so retrying it is pointless.
     ///
@@ -284,9 +255,8 @@ impl Money {
     /// [`MoneyError::InvalidPrecision`] for more than two decimal places,
     /// [`MoneyError::AmbiguousSeparators`] when separator roles are mixed,
     /// [`MoneyError::MalformedGrouping`] when groups are not 1-3 digits
-    /// followed by groups of exactly three, [`MoneyError::Negative`] for a
-    /// nonzero negative amount, and [`MoneyError::OutOfRange`] when the amount
-    /// does not fit in [`i64`] cents.
+    /// followed by groups of exactly three, and [`MoneyError::OutOfRange`] when
+    /// the amount does not fit in [`i64`] cents.
     ///
     /// ```
     /// use letterxpress::{Money, MoneyError};
@@ -297,6 +267,7 @@ impl Money {
     /// assert_eq!(german.cents(), 123_456);
     /// assert_eq!("4,50".parse::<Money>()?.cents(), 450);
     /// assert_eq!("1,234".parse::<Money>()?.cents(), 123_400);
+    /// assert_eq!("-1,234".parse::<Money>()?.cents(), -123_400);
     /// assert_eq!(
     ///     "1,234,56".parse::<Money>(),
     ///     Err(MoneyError::AmbiguousSeparators)
@@ -307,21 +278,12 @@ impl Money {
         let normalized = normalize_amount(text)?;
         let amount = Decimal::from_str(&normalized).map_err(|_| MoneyError::OutOfRange)?;
 
-        if amount.is_sign_negative() {
-            if amount.is_zero() {
-                return Ok(Self::ZERO);
-            }
-            return Err(MoneyError::Negative);
-        }
-
-        let max = Decimal::new(i64::MAX, 2);
-        if amount > max {
-            return Err(MoneyError::OutOfRange);
-        }
-
         let cents = amount * Decimal::ONE_HUNDRED;
-        let cents = i64::try_from(cents).map_err(|_| MoneyError::OutOfRange)?;
-        Self::from_cents(cents)
+        let cents = cents
+            .to_i128()
+            .and_then(|cents| i64::try_from(cents).ok())
+            .ok_or(MoneyError::OutOfRange)?;
+        Ok(Self::from_cents(cents))
     }
 }
 
@@ -337,6 +299,23 @@ impl FromStr for Money {
     /// ```
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
+    }
+}
+
+impl Add for Money {
+    type Output = Result<Self, MoneyError>;
+
+    /// Checked cents addition; the error is [`MoneyError::OutOfRange`].
+    ///
+    /// ```
+    /// use letterxpress::Money;
+    ///
+    /// let sum = (Money::from_cents(10) + Money::from_cents(20))?;
+    /// assert_eq!(sum.cents(), 30);
+    /// # Ok::<(), letterxpress::MoneyError>(())
+    /// ```
+    fn add(self, rhs: Self) -> Self::Output {
+        self.checked_add(rhs)
     }
 }
 
@@ -497,11 +476,16 @@ impl fmt::Display for Money {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{:02}", self.cents / 100, self.cents % 100)
+        let sign = if self.cents < 0 { "-" } else { "" };
+        let magnitude = self.cents.unsigned_abs();
+        write!(f, "{sign}{}.{:02}", magnitude / 100, magnitude % 100)
     }
 }
 
 impl Serialize for Money {
+    /// Serializes through the lossy [`Money::euros`] view as a JSON number so
+    /// provider-shaped values keep their established representation. Use
+    /// [`Money::cents`] when exactness matters.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_f64(self.euros())
     }
@@ -519,7 +503,7 @@ impl Visitor<'_> for MoneyVisitor {
     type Value = Money;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a nonnegative euro amount as a number or a grouped decimal string")
+        f.write_str("a signed euro amount as a number or a grouped decimal string")
     }
 
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
@@ -527,13 +511,11 @@ impl Visitor<'_> for MoneyVisitor {
     }
 
     fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        if value < 0 {
-            return Err(E::custom(MoneyError::Negative));
-        }
         value
             .checked_mul(100)
             .ok_or_else(|| E::custom(MoneyError::OutOfRange))
-            .and_then(|cents| Money::from_cents(cents).map_err(E::custom))
+            .map(Money::from_cents)
+            .map_err(E::custom)
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -542,7 +524,7 @@ impl Visitor<'_> for MoneyVisitor {
         if value > max_euros {
             return Err(E::custom(MoneyError::OutOfRange));
         }
-        Money::from_cents((value * 100) as i64).map_err(E::custom)
+        Ok(Money::from_cents((value * 100) as i64))
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -550,17 +532,22 @@ impl Visitor<'_> for MoneyVisitor {
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-        Ok(Money::ZERO)
+        Err(E::custom(
+            "money amount must be a number or a decimal string",
+        ))
     }
 
     fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-        Ok(Money::ZERO)
+        Err(E::custom(
+            "money amount must be a number or a decimal string",
+        ))
     }
 }
 
 impl<'de> Deserialize<'de> for Money {
-    /// Numbers and null keep their existing scalar meaning; strings follow the
-    /// documented [`Money::parse`] normalization rules.
+    /// Numbers become signed cents and strings follow the documented
+    /// [`Money::parse`] normalization rules. `null` is not a monetary value;
+    /// use `Option<Money>` where the provider may omit it.
     ///
     /// ```
     /// let us: letterxpress::Money = serde_json::from_str(r#""1,234.56""#)?;
@@ -579,11 +566,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cents_boundaries_are_checked() {
-        assert_eq!(Money::from_cents(0).map(Money::cents), Ok(0));
-        assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
-        assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
-        assert_eq!(Money::from_cents(i64::MIN), Err(MoneyError::Negative));
+    fn cents_cover_the_full_signed_range() {
+        assert_eq!(Money::from_cents(0).cents(), 0);
+        assert_eq!(Money::from_cents(-1).cents(), -1);
+        assert_eq!(Money::from_cents(i64::MAX).cents(), i64::MAX);
+        assert_eq!(Money::from_cents(i64::MIN).cents(), i64::MIN);
     }
 
     #[test]
@@ -594,31 +581,37 @@ mod tests {
             Money::from_euros(f64::NEG_INFINITY),
             Err(MoneyError::NotFinite)
         );
-        assert_eq!(Money::from_euros(-0.01), Err(MoneyError::Negative));
+        assert_eq!(Money::from_euros(-0.01)?.cents(), -1);
         assert_eq!(Money::from_euros(f64::MAX), Err(MoneyError::OutOfRange));
         assert_eq!(
             Money::from_euros(9_223_372_036_854_770.0)?.cents(),
-            922_337_203_685_476_992
+            922_337_203_685_477_000
         );
         Ok(())
     }
 
     #[test]
-    fn rounding_is_half_up_for_nonnegative_amounts() {
+    fn rounding_is_half_away_from_zero_for_both_signs() {
         assert_eq!(Money::from_euros(4.999).map(Money::cents), Ok(500));
         assert_eq!(Money::from_euros(0.005).map(Money::cents), Ok(1));
         assert_eq!(Money::from_euros(0.0049).map(Money::cents), Ok(0));
+        assert_eq!(Money::from_euros(-4.999).map(Money::cents), Ok(-500));
+        assert_eq!(Money::from_euros(-0.005).map(Money::cents), Ok(-1));
+        assert_eq!(Money::from_euros(-0.0049).map(Money::cents), Ok(0));
     }
 
     #[test]
-    fn arithmetic_is_checked() -> Result<(), MoneyError> {
-        let one = Money::from_cents(1)?;
-        let max = Money::from_cents(i64::MAX)?;
+    fn arithmetic_is_checked() {
+        let one = Money::from_cents(1);
+        let max = Money::from_cents(i64::MAX);
         assert_eq!(max.checked_add(Money::ZERO), Ok(max));
         assert_eq!(max.checked_add(one), Err(MoneyError::OutOfRange));
         assert_eq!(max.checked_sub(max), Ok(Money::ZERO));
-        assert_eq!(Money::ZERO.checked_sub(one), Err(MoneyError::Negative));
-        Ok::<(), MoneyError>(())
+        assert_eq!(Money::ZERO.checked_sub(one), Ok(Money::from_cents(-1)));
+        assert_eq!(
+            Money::from_cents(i64::MIN).checked_sub(one),
+            Err(MoneyError::OutOfRange)
+        );
     }
 
     #[test]
@@ -710,7 +703,8 @@ mod tests {
                 "{text:?}"
             );
         }
-        assert_eq!(cents_from("-1.234,56"), Err(MoneyError::Negative));
+        assert_eq!(cents_from("-1.234,56"), Ok(-123_456));
+        assert_eq!(cents_from("-92,233,720,368,547,758.08"), Ok(i64::MIN));
     }
 
     #[test]
@@ -743,14 +737,14 @@ mod tests {
         assert_eq!(
             MoneyVisitor
                 .visit_i64::<serde_json::Error>(3)
-                .expect("nonnegative")
+                .expect("signed")
                 .cents(),
             300
         );
         assert_eq!(
             MoneyVisitor
                 .visit_u64::<serde_json::Error>(4)
-                .expect("nonnegative")
+                .expect("unsigned")
                 .cents(),
             400
         );
@@ -763,20 +757,8 @@ mod tests {
                 cents
             );
         }
-        assert_eq!(
-            MoneyVisitor
-                .visit_unit::<serde_json::Error>()
-                .expect("null")
-                .cents(),
-            0
-        );
-        assert_eq!(
-            MoneyVisitor
-                .visit_none::<serde_json::Error>()
-                .expect("none")
-                .cents(),
-            0
-        );
+        assert!(MoneyVisitor.visit_unit::<serde_json::Error>().is_err());
+        assert!(MoneyVisitor.visit_none::<serde_json::Error>().is_err());
 
         for bad in [
             "NaN",
@@ -785,7 +767,6 @@ mod tests {
             "+4.5",
             "4.5e2",
             "4.5.",
-            "-1",
             "1,234,56",
             "9223372036854775808",
         ] {
@@ -797,7 +778,13 @@ mod tests {
         assert!(MoneyVisitor
             .visit_f64::<serde_json::Error>(f64::NAN)
             .is_err());
-        assert!(MoneyVisitor.visit_i64::<serde_json::Error>(-1).is_err());
+        assert_eq!(
+            MoneyVisitor
+                .visit_i64::<serde_json::Error>(-1)
+                .expect("negative")
+                .cents(),
+            -100
+        );
         assert!(MoneyVisitor
             .visit_u64::<serde_json::Error>(i64::MAX as u64)
             .is_err());

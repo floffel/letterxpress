@@ -1103,7 +1103,7 @@ impl<T: Transport> Client<T> {
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
     /// let letter = Letter::new(b"%PDF-1.4\n")?.with_notice("dispatch-1")?;
     /// let job = client.submit_print_job(&letter).await?;
-    /// assert_eq!(job.total().expect("total").cents(), 81);
+    /// assert_eq!(job.total().expect("total").map(letterxpress::Money::cents), Some(81));
     /// # Ok(())
     /// # }
     /// ```
@@ -1457,10 +1457,10 @@ impl<T: Transport> Client<T> {
     /// use letterxpress::transport::{MockTransport, Response};
     ///
     /// # async fn demo() -> Result<(), letterxpress::Error> {
-    /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"transactions":[{"amount":0.81,"currency":"EUR"}]}}"#))]);
+    /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"transactions":[{"amount":-0.81,"currency":"EUR"}]}}"#))]);
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
     /// let page = client.transactions(&TransactionQuery::new()).await?;
-    /// assert_eq!(page.entries[0].amount.cents(), 81);
+    /// assert_eq!(page.entries[0].amount.map(letterxpress::Money::cents), Some(-81));
     /// # Ok(())
     /// # }
     /// ```
@@ -1485,7 +1485,7 @@ impl<T: Transport> Client<T> {
     /// # async fn demo() -> Result<(), letterxpress::Error> {
     /// let mock = MockTransport::new([Ok(Response::json_response(200, r#"{"status":200,"data":{"invoices":[{"id":25402,"amount":0.67,"vat":0.13,"invoice_date":"2020-05-31"}]}}"#))]);
     /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
-    /// assert_eq!(client.invoices(1).await?.invoices[0].total().expect("total").cents(), 80);
+    /// assert_eq!(client.invoices(1).await?.invoices[0].total().expect("total").map(letterxpress::Money::cents), Some(80));
     /// # Ok(())
     /// # }
     /// ```

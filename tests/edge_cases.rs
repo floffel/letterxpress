@@ -738,8 +738,8 @@ async fn camel_case_keys_and_string_numbers_decode() {
         Some("Rechnung-123456.pdf")
     );
     assert_eq!(
-        job.items[0].net.cents(),
-        67,
+        job.items[0].net.map(Money::cents),
+        Some(67),
         "an amount may arrive as a string"
     );
     assert_eq!(
@@ -769,7 +769,7 @@ async fn unicode_addresses_survive_unchanged() {
         job.filename_original.as_deref(),
         Some("Straßenfest 会议.pdf")
     );
-    assert_eq!(job.total().expect("total").cents(), 250);
+    assert_eq!(job.total().expect("total").map(Money::cents), Some(250));
 }
 
 #[tokio::test]
@@ -1956,20 +1956,95 @@ fn a_hand_built_page_total_saturates_instead_of_wrapping() {
 }
 
 #[test]
-fn money_helpers_are_stable_at_the_boundaries() {
-    assert_eq!(Money::from_cents(0).map(Money::cents), Ok(0));
-    assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
-    assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
+fn omitted_and_null_billing_amounts_stay_unknown() {
+    let job: PrintJob = serde_json::from_str(
+        r#"{"id":1,"items":[{"pages":1},{"pages":1,"amount":null,"vat":null}]}"#,
+    )
+    .expect("unknown amounts are valid");
+    assert_eq!(job.items[0].net, None);
+    assert_eq!(job.items[0].vat, None);
+    assert_eq!(job.items[0].total().expect("unknown total"), None);
+    assert_eq!(job.net().expect("unknown net"), None);
+    assert_eq!(job.total().expect("unknown total"), None);
+
+    let email: letterxpress::EmailJob =
+        serde_json::from_str(r#"{"id":1,"amount":null,"vat":0.01}"#).expect("email");
+    assert_eq!(email.net(), None);
+    assert_eq!(email.total().expect("unknown total"), None);
+
+    let transaction: letterxpress::Transaction =
+        serde_json::from_str(r#"{"amount":null,"currency":"EUR"}"#).expect("transaction");
+    assert_eq!(transaction.amount, None);
+
+    let invoice: letterxpress::Invoice =
+        serde_json::from_str(r#"{"id":1,"amount":null,"vat":0}"#).expect("invoice");
+    assert_eq!(invoice.total().expect("unknown total"), None);
+}
+
+#[test]
+fn malformed_billing_amounts_fail_instead_of_becoming_unknown() {
+    for amount in ["\"not money\"", "true", "[]"] {
+        let job = format!(r#"{{"id":1,"items":[{{"amount":{amount},"vat":0.13}}]}}"#);
+        assert!(serde_json::from_str::<PrintJob>(&job).is_err(), "{job}");
+
+        let email = format!(r#"{{"id":1,"amount":{amount},"vat":0.01}}"#);
+        assert!(
+            serde_json::from_str::<letterxpress::EmailJob>(&email).is_err(),
+            "{email}"
+        );
+
+        let transaction = format!(r#"{{"amount":{amount},"currency":"EUR"}}"#);
+        assert!(
+            serde_json::from_str::<letterxpress::Transaction>(&transaction).is_err(),
+            "{transaction}"
+        );
+
+        let invoice = format!(r#"{{"id":1,"amount":{amount},"vat":0.13}}"#);
+        assert!(
+            serde_json::from_str::<letterxpress::Invoice>(&invoice).is_err(),
+            "{invoice}"
+        );
+    }
+}
+
+#[test]
+fn reported_zero_is_distinct_from_an_unknown_amount() {
+    let job: PrintJob =
+        serde_json::from_str(r#"{"id":1,"items":[{"amount":0,"vat":0},{"amount":null,"vat":0}]}"#)
+            .expect("mixed reporting states decode");
     assert_eq!(
-        Money::from_cents(i64::MAX)
-            .expect("max")
-            .checked_add(Money::from_cents(1).expect("one")),
+        job.items[0].total().expect("reported zero"),
+        Some(Money::ZERO)
+    );
+    assert_eq!(job.items[1].total().expect("unknown"), None);
+    assert_eq!(job.total().expect("aggregate with unknown"), None);
+
+    let zero_job: PrintJob =
+        serde_json::from_str(r#"{"id":1,"items":[{"amount":0,"vat":0}]}"#).expect("zero job");
+    assert_eq!(zero_job.total().expect("reported zero"), Some(Money::ZERO));
+
+    let zero_invoice: letterxpress::Invoice =
+        serde_json::from_str(r#"{"id":1,"amount":0,"vat":0}"#).expect("zero invoice");
+    assert_eq!(
+        zero_invoice.total().expect("reported zero"),
+        Some(Money::ZERO)
+    );
+}
+
+#[test]
+fn money_helpers_are_stable_at_the_boundaries() {
+    assert_eq!(Money::from_cents(0).cents(), 0);
+    assert_eq!(Money::from_cents(-1).cents(), -1);
+    assert_eq!(Money::from_cents(i64::MAX).cents(), i64::MAX);
+    assert_eq!(Money::from_cents(i64::MIN).cents(), i64::MIN);
+    assert_eq!(
+        Money::from_cents(i64::MAX).checked_add(Money::from_cents(1)),
         Err(MoneyError::OutOfRange)
     );
 
     assert_eq!(Money::from_euros(f64::NAN), Err(MoneyError::NotFinite));
     assert_eq!(Money::from_euros(f64::INFINITY), Err(MoneyError::NotFinite));
-    assert_eq!(Money::from_euros(-0.01), Err(MoneyError::Negative));
+    assert_eq!(Money::from_euros(-0.01).map(Money::cents), Ok(-1));
     assert_eq!(Money::from_euros(f64::MAX), Err(MoneyError::OutOfRange));
     assert_eq!(
         Money::from_euros(4.999).map(Money::cents),
@@ -1993,11 +2068,12 @@ fn money_has_explicit_half_cent_text_and_range_boundaries() {
     for (euros, cents) in [(0.0, 0), (0.005, 1), (0.125, 13)] {
         assert_eq!(Money::from_euros(euros).map(Money::cents), Ok(cents));
     }
-    for euros in [-0.005, -0.125] {
-        assert_eq!(Money::from_euros(euros), Err(MoneyError::Negative));
+    for (euros, cents) in [(-0.005, -1), (-0.125, -13)] {
+        assert_eq!(Money::from_euros(euros).map(Money::cents), Ok(cents));
     }
 
-    assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
+    assert_eq!(Money::from_cents(i64::MAX).cents(), i64::MAX);
+    assert_eq!(Money::from_cents(i64::MIN).cents(), i64::MIN);
     assert_eq!(
         "92233720368547758.07".parse::<Money>().map(Money::cents),
         Ok(i64::MAX)
@@ -2032,21 +2108,15 @@ fn money_has_explicit_half_cent_text_and_range_boundaries() {
 }
 
 #[test]
-fn money_deserialisation_rejects_non_finite_negative_and_overflowing_values() {
-    for bad in [
-        "NaN",
-        "inf",
-        "-inf",
-        "1e400",
-        "-0.01",
-        "9223372036854775808",
-    ] {
+fn money_deserialisation_accepts_negative_and_rejects_null_non_finite_and_overflow() {
+    for bad in ["NaN", "inf", "-inf", "1e400", "9223372036854775808"] {
         assert!(
             serde_json::from_str::<Money>(&format!("\"{bad}\"")).is_err(),
             "{bad}"
         );
     }
-    assert!(serde_json::from_str::<Money>("-1").is_err());
+    assert_eq!(serde_json::from_str::<Money>("-1").unwrap().cents(), -100);
+    assert!(serde_json::from_str::<Money>("null").is_err());
     assert!(serde_json::from_str::<Money>("1e400").is_err());
     assert!(serde_json::from_str::<Money>(&i64::MAX.to_string()).is_err());
     assert_eq!(serde_json::from_str::<Money>("0").expect("zero").cents(), 0);
@@ -2077,14 +2147,8 @@ fn money_deserialisation_reads_grouping_as_grouping() {
 
 #[test]
 fn money_string_parser_reports_typed_terminal_errors() {
-    assert_eq!(
-        "1,234".parse::<Money>(),
-        Ok(Money::from_cents(123_400).expect("valid"))
-    );
-    assert_eq!(
-        "1.234,56".parse::<Money>(),
-        Ok(Money::from_cents(123_456).expect("valid"))
-    );
+    assert_eq!("1,234".parse::<Money>(), Ok(Money::from_cents(123_400)));
+    assert_eq!("1.234,56".parse::<Money>(), Ok(Money::from_cents(123_456)));
     assert_eq!(
         "+4.5".parse::<Money>(),
         Err(MoneyError::InvalidFormat("leading plus sign"))
@@ -2108,7 +2172,7 @@ fn money_string_parser_reports_typed_terminal_errors() {
         "12,34,567".parse::<Money>(),
         Err(MoneyError::MalformedGrouping)
     );
-    assert_eq!("-1".parse::<Money>(), Err(MoneyError::Negative));
+    assert_eq!("-1".parse::<Money>(), Ok(Money::from_cents(-100)));
 }
 
 #[test]

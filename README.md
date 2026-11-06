@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_notice("antrag-4711")?;
 
     let job = client.submit_print_job(&letter).await?;
-    println!("job {} totals {}", job.id, job.total()?);
+    println!("job {} totals {:?}", job.id, job.total()?);
     Ok(())
 }
 ```
@@ -93,7 +93,7 @@ decodes every fixture.
 | `base64_file_checksum` = MD5 hex of the **base64 text** | **verified** | p. 7 |
 | All 16 endpoints, their request bodies and response objects | **verified** | p. 10–33 |
 | Job statuses `queue`/`hold`/`done`/`canceled`/`draft` (+ item `sent`, e-mail `success`) | **verified** | p. 12, 13, 26 |
-| `amount` + `vat` = the charged amount | **verified** | p. 13 vs p. 30 (0.68 + 0.13 = the 0.81 debit) |
+| `amount` + `vat` = the charged amount | **verified** | p. 13 vs p. 30 (0.68 + 0.13 = the 0.81 debit); omitted or `null` components stay unknown |
 | `429` + `Retry-After` | **unverified** | the limit is documented, the rejection code is not; mapped as a retryable error |
 | `error`/`errors` keys instead of `message` | **unverified** | accepted when present, never required |
 | `id` as a JSON string | **unverified** | accepted, documented as a number |

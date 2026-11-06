@@ -200,10 +200,10 @@ proptest! {
     }
 
     /// Money survives a trip through cents and its canonical decimal form for
-    /// every valid value, including the full `i64` range.
+    /// every `i64` cent value, including both signs.
     #[test]
-    fn cents_round_trip(cents in 0i64..=i64::MAX) {
-        let money = Money::from_cents(cents).expect("nonnegative");
+    fn cents_round_trip(cents in any::<i64>()) {
+        let money = Money::from_cents(cents);
         prop_assert_eq!(money.cents(), cents);
         prop_assert_eq!(Money::parse(&money.to_string()), Ok(money));
     }
@@ -211,19 +211,20 @@ proptest! {
     /// Net plus tax is the checked sum in cents, including overflow at the top
     /// of the representable range.
     #[test]
-    fn totals_add_up(a in 0i64..=i64::MAX, b in 0i64..=i64::MAX) {
-        let net = Money::from_cents(a).expect("nonnegative");
-        let vat = Money::from_cents(b).expect("nonnegative");
+    fn totals_add_up(a in any::<i64>(), b in any::<i64>()) {
+        let net = Money::from_cents(a);
+        let vat = Money::from_cents(b);
         prop_assert_eq!(net.checked_add(vat), net.total(vat));
         if let Some(sum) = a.checked_add(b) {
             prop_assert_eq!(net.total(vat).map(Money::cents), Ok(sum));
         } else {
             prop_assert_eq!(net.total(vat), Err(letterxpress::MoneyError::OutOfRange));
         }
+        prop_assert_eq!(net + vat, net.total(vat));
     }
 
     /// The decimal parser preserves ordering for canonical amounts across the
-    /// full nonnegative `i64` cent range.
+    /// nonnegative `i64` cent range used by the parser's ordering fixture.
     #[test]
     fn parsed_cents_are_monotonic(a in 0i64..=i64::MAX, b in 0i64..=i64::MAX) {
         let (low, high) = if a <= b { (a, b) } else { (b, a) };
@@ -268,7 +269,7 @@ proptest! {
     /// accepted, and the serialised value uses the shared canonical form.
     #[test]
     fn bank_amounts_cover_the_provider_range(cents in 0i64..=99_999_999_999) {
-        let amount = Money::from_cents(cents).expect("nonnegative").to_string();
+        let amount = Money::from_cents(cents).to_string();
         prop_assert!(amount.chars().count() <= MAX_BANK_AMOUNT_CHARS);
         let form = BankForm::generated(
             "A",
@@ -402,12 +403,12 @@ proptest! {
             if job.status == JobStatus::Other(String::new()) {
                 prop_assert!(!job.is_terminal());
             }
-            if let (Ok(total), Ok(net), Some(vat)) = (
+            if let (Ok(Some(total)), Ok(Some(net)), Some(vat)) = (
                 job.total(),
                 job.net(),
                 job.items
                     .iter()
-                    .try_fold(0i64, |sum, item| sum.checked_add(item.vat.cents())),
+                    .try_fold(0i64, |sum, item| sum.checked_add(item.vat?.cents())),
             ) {
                 prop_assert_eq!(total.cents(), net.cents() + vat);
             }

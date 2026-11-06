@@ -197,8 +197,8 @@ its own request budget to one minute of the documented 120 requests per minute.
 | --- | --- | --- |
 | `address` | string | `"Jim Knopf, Bahnhofstr. 1, 21337 Lüneburg"` — one line, read-only |
 | `pages` | int | verified |
-| `amount` | number | net amount in EUR, e.g. `0.68` |
-| `vat` | number | tax portion, e.g. `0.13` |
+| `amount` | number | net amount in EUR, e.g. `0.68`; omitted/`null` means unknown |
+| `vat` | number | tax portion, e.g. `0.13`; omitted/`null` means unknown |
 | `status` | string | `queue`, `sent` in examples |
 | `tracking_code` | string, optional | `RC123456789DE` (registered mail) |
 | `tracking_status` | string, optional | German carrier text |
@@ -216,7 +216,9 @@ A decoded job therefore totals at most 500 000 000 pages, which keeps
 national page it reports `amount: 0.68, vat: 0.13`, and the same job appears in
 the transaction ledger as `-0.81` — i.e. **`amount + vat` is what is charged**.
 The crate therefore models `PrintItem::net()`, `vat()` and `total()` and never
-presents `amount` as "the price".
+presents `amount` as "the price". Billing components are `Option<Money>`:
+omitting or nulling one leaves the total unknown, while a reported `0` stays
+`Some(Money::ZERO)`.
 
 ### Email job (p. 20/24/25/26)
 
@@ -247,8 +249,8 @@ the crate has no per-page parameter).
 | --- | --- | --- |
 | balance | `balance` (number), `currency` (`"EUR"`) | p. 10 |
 | journal | `csv_base64` (base64 of a CSV, `;`-separated, quoted) | p. 29 |
-| transaction | `amount` (negative = charge), `currency`, `description`, `created_at` | p. 30 |
-| invoice | `id` (int), `amount`, `vat`, `invoice_date` | p. 31 |
+| transaction | `amount` (negative = charge; omitted/`null` = unknown), `currency`, `description`, `created_at` | p. 30 |
+| invoice | `id` (int), `amount`, `vat` (omitted/`null` = unknown), `invoice_date` | p. 31 |
 | invoice PDF | the above plus `base64_data` | p. 33 |
 
 ### Price echo (p. 10–11)
