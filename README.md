@@ -187,8 +187,10 @@ stack, no async runtime, no socket. Bring your own `Transport` implementation
 - Payload sizes are checked before allocation; decoded base64 is bounded by the
   documented 50 MB; a decoded job is bounded to 50 000 items of at most 10 000
   pages each, so `PrintJob::pages()` cannot overflow; a provider `Retry-After`
-  is bounded to `MAX_RETRY_AFTER`; error bodies are truncated to 512 characters
-  before they reach a log line.
+  is bounded to `MAX_RETRY_AFTER`; response bodies are streamed through a 1 MiB
+  cap (70 MiB for the invoice-document endpoint, whose PDF is base64-encoded);
+  and provider error text is capped at 512 characters before it reaches a log
+  line.
 - There is no shared secret to compare in this protocol (the key is a bearer
   credential in the body, not a signature the client verifies), so there is no
   constant-time comparison to make. Nothing in the crate logs a body.
