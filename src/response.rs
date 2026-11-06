@@ -516,7 +516,7 @@ fn cap_error_text(text: &str) -> String {
 /// retry immediately — it is a header nobody meant to send.
 ///
 /// The ceiling is applied here, where provider-controlled data enters the
-/// crate, so no decoded error carries a wait longer than five minutes. See
+/// crate, so no decoded error carries a wait longer than one hour. See
 /// [`MAX_RETRY_AFTER`](crate::MAX_RETRY_AFTER) for why that is the right bound
 /// for a 120-per-minute contract.
 fn parse_retry_after(response: &Response) -> Option<Duration> {
@@ -915,12 +915,16 @@ mod tests {
         assert_eq!(hint(Some("0")), Some(Duration::ZERO));
 
         // Just inside the ceiling, exactly at it, and one second past it.
-        assert_eq!(hint(Some("299")), Some(Duration::from_secs(299)));
-        assert_eq!(hint(Some("300")), Some(crate::MAX_RETRY_AFTER));
-        assert_eq!(hint(Some("301")), Some(crate::MAX_RETRY_AFTER));
+        assert_eq!(hint(Some("3599")), Some(Duration::from_secs(3_599)));
+        assert_eq!(hint(Some("3600")), Some(crate::MAX_RETRY_AFTER));
+        assert_eq!(hint(Some("3601")), Some(crate::MAX_RETRY_AFTER));
 
-        // A day, and a value one above `u64::MAX` (which cannot be parsed).
+        // A day and the largest `u64` clamp; one above `u64::MAX` is unreadable.
         assert_eq!(hint(Some("86400")), Some(crate::MAX_RETRY_AFTER));
+        assert_eq!(
+            hint(Some("18446744073709551615")),
+            Some(crate::MAX_RETRY_AFTER)
+        );
         assert_eq!(hint(Some("18446744073709551616")), None);
 
         // Surrounding whitespace is not a reason to drop a readable header.

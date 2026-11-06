@@ -427,17 +427,19 @@ async fn rate_limit_without_a_retry_after_header_still_maps() {
 }
 
 /// The provider's `Retry-After` is honoured as written up to the ceiling and
-/// clamped at it — a header cannot park a caller for hours.
+/// clamped at it — a header cannot park a caller past the one-hour ceiling.
 #[tokio::test]
 async fn retry_after_is_honoured_up_to_the_ceiling_and_clamped_past_it() {
     use std::time::Duration;
 
     for (header, expected) in [
-        ("299", Some(Duration::from_secs(299))), // just inside the ceiling
-        ("300", Some(MAX_RETRY_AFTER)),          // exactly at it
-        ("301", Some(MAX_RETRY_AFTER)),          // just outside it
-        ("86400", Some(MAX_RETRY_AFTER)),        // a day: clamped, not obeyed
-        ("Wed, 21 Oct 2015 07:28:00 GMT", None), // HTTP-date: no usable hint
+        ("3599", Some(Duration::from_secs(3_599))), // just inside the ceiling
+        ("3600", Some(MAX_RETRY_AFTER)),            // exactly at it
+        ("3601", Some(MAX_RETRY_AFTER)),            // just outside it
+        ("86400", Some(MAX_RETRY_AFTER)),           // a day: clamped, not obeyed
+        ("18446744073709551615", Some(MAX_RETRY_AFTER)), // u64::MAX: clamped, no overflow
+        ("18446744073709551616", None),             // one above u64::MAX: still unreadable
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),    // HTTP-date: no usable hint
         ("garbage", None),
     ] {
         let client = client_with(vec![Response::new(
@@ -466,8 +468,18 @@ fn a_hand_built_rate_limit_is_capped_by_the_accessor() {
         retry_after: Some(Duration::from_secs(86_400)),
     };
     assert_eq!(absurd.retry_after(), Some(MAX_RETRY_AFTER));
-    assert!(absurd.to_string().contains("retry after 300s"));
+    assert!(absurd.to_string().contains("retry after 3600s"));
     assert!(absurd.to_string().contains("capped from 86400s"));
+
+    // A hand-built value at the numeric limit saturates without overflowing.
+    let maximum = Error::RateLimited {
+        retry_after: Some(Duration::from_secs(u64::MAX)),
+    };
+    assert_eq!(maximum.retry_after(), Some(MAX_RETRY_AFTER));
+    assert!(maximum.to_string().contains("retry after 3600s"));
+    assert!(maximum
+        .to_string()
+        .contains("capped from 18446744073709551615s"));
 
     // At or below the ceiling nothing is rewritten.
     let inside = Error::RateLimited {
@@ -476,7 +488,7 @@ fn a_hand_built_rate_limit_is_capped_by_the_accessor() {
     assert_eq!(inside.retry_after(), Some(MAX_RETRY_AFTER));
     assert_eq!(
         inside.to_string(),
-        "letterxpress rate limit reached, retry after 300s"
+        "letterxpress rate limit reached, retry after 3600s"
     );
 
     // No hint: no suffix, and the accessor has nothing to offer.

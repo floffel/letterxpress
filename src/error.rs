@@ -23,9 +23,9 @@
 //!
 //! A `429` also carries a waiting time. [`Error::retry_after`] reports the
 //! provider's `Retry-After` bounded by [`MAX_RETRY_AFTER`], so a header cannot
-//! park a caller for hours, and `None` there means "no usable hint, back off on
-//! your own" — never "retry immediately". A retry that is allowed is not always
-//! a retry that is due: the crate invents no delay of its own.
+//! park a caller unreasonably long, and `None` there means "no usable hint,
+//! back off on your own" — never "retry immediately". A retry that is allowed
+//! is not always a retry that is due: the crate invents no delay of its own.
 
 use std::time::Duration;
 
@@ -226,8 +226,9 @@ impl std::fmt::Display for AmbiguousKind {
 /// answer asks for seconds, not for hours: a header saying `86400` describes
 /// something other than this contract — a proxy's own throttle, a misconfigured
 /// edge, or a hostile response — and honouring it verbatim parks the caller for
-/// a day. Five minutes is far above anything the contract can demand and far
-/// below anything that hurts.
+/// a day. One hour is far above anything the contract can demand while keeping
+/// an accidental or hostile value from parking a retry worker indefinitely.
+/// Values above the ceiling are clamped to it rather than ignored.
 ///
 /// The cap is applied where the header enters the crate and again by
 /// [`Error::retry_after`], so no path hands out an unbounded wait. Waiting the
@@ -243,13 +244,13 @@ impl std::fmt::Display for AmbiguousKind {
 ///
 /// use letterxpress::{Error, MAX_RETRY_AFTER};
 ///
-/// assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(300));
+/// assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(3_600));
 ///
 /// // A header an order of magnitude above the ceiling is reported at it.
-/// let err = Error::RateLimited { retry_after: Some(Duration::from_secs(86_400)) };
+/// let err = Error::RateLimited { retry_after: Some(Duration::from_secs(u64::MAX)) };
 /// assert_eq!(err.retry_after(), Some(MAX_RETRY_AFTER));
 /// ```
-pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(3_600);
 
 /// The wait to actually honour: the provider's value, never above
 /// [`MAX_RETRY_AFTER`].
@@ -776,8 +777,8 @@ impl Error {
     /// assert!(no_hint.is_retryable_for(true));
     /// assert_eq!(no_hint.retry_after(), None, "no hint is not no wait");
     ///
-    /// // The provider asked for an hour: honour the ceiling, not the hour.
-    /// let absurd = Error::RateLimited { retry_after: Some(Duration::from_secs(3600)) };
+    /// // The provider asked for more than an hour: honour the ceiling.
+    /// let absurd = Error::RateLimited { retry_after: Some(Duration::from_secs(3_601)) };
     /// assert_eq!(absurd.retry_after(), Some(MAX_RETRY_AFTER));
     ///
     /// let gone = Error::NotFound { message: "gone".into() };

@@ -150,7 +150,7 @@ the request exactly once and never retries it.
 
 | Failure | What it means | What to do |
 | --- | --- | --- |
-| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | wait `error.retry_after()` (never more than 5 min) and retry; `None` means no usable header — back off exponentially |
+| `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | wait `error.retry_after()` (never more than 1 hour) and retry; `None` means no usable header — back off exponentially |
 | `Error::Transport { kind: Connect, .. }` | nothing was written | safe to retry |
 | `Error::Transport { kind: Timeout \| Io, .. }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
@@ -171,10 +171,10 @@ never promoted to `Ambiguous`. `Error::Ambiguous` carries an `AmbiguousKind`
 and `Error::status()` returns the numeric HTTP status for an `Upstream` kind,
 so reconciliation and alerting branch on data, never on the message text.
 
-`Retry-After` is clamped to `MAX_RETRY_AFTER` (5 minutes) where the header is
+`Retry-After` is clamped to `MAX_RETRY_AFTER` (1 hour) where the header is
 decoded and again by `Error::retry_after()`, so a `429` carrying `86400` — a
 proxy's throttle, a misconfigured edge, a hostile answer — parks a caller for
-five minutes, not for a day. `None` means the header was absent or unreadable
+one hour, not for a day. `None` means the header was absent or unreadable
 (an HTTP-date, a negative number, a list): back off on your own rather than
 retrying immediately, because the exhausted window refills per minute.
 
