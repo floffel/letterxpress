@@ -1199,22 +1199,26 @@ fn query_objects_serialise_only_what_was_set() {
 }
 
 #[test]
-fn journal_filter_serialises_every_field() {
-    assert!(JournalFilter::new().to_json().is_empty());
+fn journal_filter_encodes_every_field_once() {
+    assert_eq!(JournalFilter::new().to_query_string(), None);
     let filter = JournalFilter::new()
         .with_type(JournalType::MailPlus)
-        .with_search("4711")
+        .with_search("4711 & Größe")
         .unwrap()
         .with_range(
             Date::new(2026, 1, 1).unwrap(),
             Date::new(2026, 1, 31).unwrap(),
         )
         .unwrap();
+    assert_eq!(
+        filter.to_query_string().as_deref(),
+        Some(
+            "type=mailplus&searchstr=4711+%26+Gr%C3%B6%C3%9Fe&start_date=2026-01-01&end_date=2026-01-31"
+        )
+    );
+
     let json = filter.to_json();
-    assert_eq!(json["type"], "mailplus");
-    assert_eq!(json["searchstr"], "4711");
-    assert_eq!(json["start_date"], "2026-01-01");
-    assert_eq!(json["end_date"], "2026-01-31");
+    assert_eq!(json["searchstr"], "4711 & Größe");
 }
 
 #[test]

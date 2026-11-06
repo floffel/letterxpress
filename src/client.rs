@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
-use url::Url;
+use url::{form_urlencoded, Url};
 
 use crate::letter::validate_email;
 use crate::response::{parse_envelope, Envelope};
@@ -604,9 +604,10 @@ impl InvoiceQuery {
 
 /// `GET /v3/journal` filter.
 ///
-/// The documentation describes these as query parameters but shows them in a
-/// `filter` object in the request body; the body form is used here, and it is
-/// the only form sent.
+/// The provider documents these as query parameters. [`Client::journal`] sends
+/// them in the URL, percent-encoded, and keeps the JSON body to the mandatory
+/// `auth` object. A GET body is not generally rejected because the provider
+/// also requires credentials in a GET body and accepts the price request there.
 ///
 /// ```
 /// use letterxpress::{Date, JournalFilter, JournalType};
@@ -615,8 +616,10 @@ impl InvoiceQuery {
 ///     .with_type(JournalType::Print)
 ///     .with_search("4711")?
 ///     .with_range(Date::new(2026, 1, 1)?, Date::new(2026, 1, 31)?)?;
-/// assert_eq!(filter.to_json()["type"], "print");
-/// assert!(filter.to_json()["start_date"].is_string());
+/// assert_eq!(
+///     filter.to_query_string().as_deref(),
+///     Some("type=print&searchstr=4711&start_date=2026-01-01&end_date=2026-01-31")
+/// );
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -635,7 +638,7 @@ impl JournalFilter {
     /// An unfiltered export.
     ///
     /// ```
-    /// assert!(letterxpress::JournalFilter::new().to_json().is_empty());
+    /// assert!(letterxpress::JournalFilter::new().to_query_string().is_none());
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -706,7 +709,47 @@ impl JournalFilter {
         Ok(self)
     }
 
-    /// The `filter` object, as documented in the request example.
+    /// The query string, without `?`, when anything is set.
+    ///
+    /// Parameter names and values are percent-encoded using
+    /// `application/x-www-form-urlencoded` rules.
+    ///
+    /// ```
+    /// # use letterxpress::{Date, JournalFilter, JournalType};
+    /// let filter = JournalFilter::new()
+    ///     .with_type(JournalType::MailPlus)
+    ///     .with_search("4711 & Größe")?
+    ///     .with_range(Date::new(2026, 1, 1)?, Date::new(2026, 1, 31)?)?;
+    /// assert_eq!(
+    ///     filter.to_query_string().as_deref(),
+    ///     Some("type=mailplus&searchstr=4711+%26+Gr%C3%B6%C3%9Fe&start_date=2026-01-01&end_date=2026-01-31")
+    /// );
+    /// # Ok::<(), letterxpress::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_query_string(&self) -> Option<String> {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        if let Some(journal_type) = &self.journal_type {
+            query.append_pair("type", journal_type.as_str());
+        }
+        if let Some(searchstr) = &self.searchstr {
+            query.append_pair("searchstr", searchstr);
+        }
+        if let Some(start) = &self.start_date {
+            query.append_pair("start_date", &start.to_string());
+        }
+        if let Some(end) = &self.end_date {
+            query.append_pair("end_date", &end.to_string());
+        }
+        let query = query.finish();
+        (!query.is_empty()).then_some(query)
+    }
+
+    /// A JSON representation of the filter fields.
+    ///
+    /// This is provided for inspection and interoperability with code that
+    /// already consumes the old body representation. [`Client::journal`] sends
+    /// these fields as query parameters instead.
     ///
     /// ```
     /// # use letterxpress::{JournalFilter, JournalType};
@@ -1401,8 +1444,9 @@ impl<T: Transport> Client<T> {
     /// the provider's answer mapped as described on [`Error`] — including
     /// [`Error::Ambiguous`] when a submit may have been processed.
     pub async fn journal(&self, filter: &JournalFilter) -> Result<Journal> {
-        let body = json!({ "filter": filter.to_json() });
-        let envelope = self.call(Method::Get, "/journal", None, Some(body)).await?;
+        let envelope = self
+            .call(Method::Get, "/journal", filter.to_query_string(), None)
+            .await?;
         decode_data("GET /v3/journal", envelope)
     }
 
@@ -1498,6 +1542,8 @@ impl<T: Transport> Client<T> {
         query: Option<String>,
         body: Option<Value>,
     ) -> Result<Envelope> {
+        validate_get_payload(method, path, body.is_some())?;
+
         let url = match query {
             Some(query) => format!("{}{}?{}", self.base_url, path, query),
             None => format!("{}{}", self.base_url, path),
@@ -1538,6 +1584,20 @@ impl<T: Transport> Client<T> {
             other => other,
         }
     }
+}
+
+/// The provider requires a JSON auth object on every GET, and its documented
+/// price request also carries `letter` there. Other endpoint payloads belong in
+/// the query string, so reject them before they can be silently stripped by an
+/// intermediary.
+fn validate_get_payload(method: Method, path: &str, has_payload: bool) -> Result<()> {
+    if method == Method::Get && has_payload && path != "/price" {
+        return Err(Error::invalid(
+            "body",
+            "GET endpoint payloads are only supported for /price; use query parameters",
+        ));
+    }
+    Ok(())
 }
 
 /// `METHOD /path` with the id placeholder kept, for error messages.
@@ -1748,6 +1808,33 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(matches!(error, Error::Validation { field: "body", .. }));
+        assert_eq!(client.transport().remaining(), 0, "nothing was sent");
+    }
+
+    #[tokio::test]
+    async fn only_price_can_carry_an_explicit_get_payload() {
+        let client = Client::new(
+            MockTransport::new([Ok(Response::json_response(
+                200,
+                r#"{"status":200,"data":{"price":0.81}}"#,
+            ))]),
+            Credentials::new("u", "k", Mode::Test).expect("credentials"),
+        );
+        let request = PriceRequest::new(1).expect("price request");
+        client.price(&request).await.expect("documented price body");
+        assert_eq!(client.transport().remaining(), 0);
+
+        let client = self::client();
+        for path in ["/balance", "/journal", "/printjobs"] {
+            let error = client
+                .call(Method::Get, path, None, Some(json!({"payload": true})))
+                .await
+                .expect_err("an endpoint payload on GET must be refused");
+            assert!(
+                matches!(error, Error::Validation { field: "body", .. }),
+                "{path}: {error:?}"
+            );
+        }
         assert_eq!(client.transport().remaining(), 0, "nothing was sent");
     }
 

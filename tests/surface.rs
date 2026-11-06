@@ -279,12 +279,12 @@ async fn delete_email_job_uses_delete_with_auth() {
 }
 
 #[tokio::test]
-async fn journal_sends_the_filter_object() {
+async fn journal_sends_filters_in_the_query_and_only_auth_in_the_body() {
     let (client, recorder) =
         recording(r#"{"status":200,"message":"OK","data":{"csv_base64":"SWQ="}}"#);
     let filter = JournalFilter::new()
         .with_type(JournalType::Print)
-        .with_search("4711")
+        .with_search("4711 & Größe")
         .expect("search")
         .with_range(
             Date::new(2026, 1, 1).expect("start"),
@@ -295,12 +295,17 @@ async fn journal_sends_the_filter_object() {
 
     let request = &recorder.requests()[0];
     assert_eq!(request.method, Method::Get);
-    assert_eq!(request.path_and_query().as_deref(), Some("/v3/journal"));
+    assert_eq!(
+        request.path_and_query().as_deref(),
+        Some(
+            "/v3/journal?type=print&searchstr=4711+%26+Gr%C3%B6%C3%9Fe&start_date=2026-01-01&end_date=2026-01-31"
+        )
+    );
     let body = request.json().expect("json");
-    assert_eq!(body["filter"]["type"], "print");
-    assert_eq!(body["filter"]["searchstr"], "4711");
-    assert_eq!(body["filter"]["start_date"], "2026-01-01");
-    assert_eq!(body["filter"]["end_date"], "2026-01-31");
+    assert_eq!(body["auth"]["username"], "kunde");
+    assert_eq!(body["auth"]["apikey"], "test-key");
+    assert_eq!(body["auth"]["mode"], "test");
+    assert!(body.get("filter").is_none());
 }
 
 #[tokio::test]
