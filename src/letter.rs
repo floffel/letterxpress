@@ -65,6 +65,13 @@ pub const MAX_PURPOSE_CHARS: usize = 27;
 #[derive(Debug, Clone)]
 struct EncodedPdf {
     base64: String,
+    bytes: usize,
+}
+
+impl EncodedPdf {
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
 }
 
 /// The printable specification of a letter (`specification`).
@@ -436,7 +443,6 @@ impl EmailDelivery {
 pub struct Backgrounds {
     first_page: Option<EncodedPdf>,
     other_pages: Option<EncodedPdf>,
-    bytes: usize,
 }
 
 impl Backgrounds {
@@ -453,9 +459,14 @@ impl Backgrounds {
     /// Background for page one.
     ///
     /// ```
-    /// # use letterxpress::Backgrounds;
-    /// let backgrounds = Backgrounds::new().with_first_page(b"%PDF-1.4\nx\n")?;
-    /// assert!(!backgrounds.is_empty());
+    /// use letterxpress::{Backgrounds, Letter};
+    ///
+    /// let body = b"%PDF-1.4\nbody\n";
+    /// let backgrounds = Backgrounds::new()
+    ///     .with_first_page(b"%PDF-1.4\nold\n")?
+    ///     .with_first_page(b"%PDF-1.4\nnew\n")?;
+    /// let letter = Letter::new(body)?.with_backgrounds(backgrounds)?;
+    /// assert_eq!(letter.total_pdf_bytes(), body.len() + b"%PDF-1.4\nnew\n".len());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     /// # Errors
@@ -463,22 +474,28 @@ impl Backgrounds {
     /// [`Error::Validation`] when the value would be rejected by the provider,
     /// [`Error::TooLarge`] when it exceeds a documented ceiling.
     pub fn with_first_page(mut self, pdf: &[u8]) -> Result<Self, Error> {
-        let mut budget = MAX_PDF_BYTES - self.bytes;
-        self.first_page = Some(encode_pdf(
+        let mut budget =
+            MAX_PDF_BYTES.saturating_sub(self.other_pages.as_ref().map_or(0, EncodedPdf::bytes));
+        let encoded = encode_pdf(
             "letter.backgrounds.base64_background_first_page",
             pdf,
             &mut budget,
-        )?);
-        self.bytes += pdf.len();
+        )?;
+        self.first_page = Some(encoded);
         Ok(self)
     }
 
     /// Background for every other page.
     ///
     /// ```
-    /// # use letterxpress::Backgrounds;
-    /// let backgrounds = Backgrounds::new().with_other_pages(b"%PDF-1.4\nx\n")?;
-    /// assert!(!backgrounds.is_empty());
+    /// use letterxpress::{Backgrounds, Letter};
+    ///
+    /// let body = b"%PDF-1.4\nbody\n";
+    /// let backgrounds = Backgrounds::new()
+    ///     .with_other_pages(b"%PDF-1.4\nold\n")?
+    ///     .with_other_pages(b"%PDF-1.4\nnew\n")?;
+    /// let letter = Letter::new(body)?.with_backgrounds(backgrounds)?;
+    /// assert_eq!(letter.total_pdf_bytes(), body.len() + b"%PDF-1.4\nnew\n".len());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     /// # Errors
@@ -486,13 +503,14 @@ impl Backgrounds {
     /// [`Error::Validation`] when the value would be rejected by the provider,
     /// [`Error::TooLarge`] when it exceeds a documented ceiling.
     pub fn with_other_pages(mut self, pdf: &[u8]) -> Result<Self, Error> {
-        let mut budget = MAX_PDF_BYTES - self.bytes;
-        self.other_pages = Some(encode_pdf(
+        let mut budget =
+            MAX_PDF_BYTES.saturating_sub(self.first_page.as_ref().map_or(0, EncodedPdf::bytes));
+        let encoded = encode_pdf(
             "letter.backgrounds.base64_background_other_pages",
             pdf,
             &mut budget,
-        )?);
-        self.bytes += pdf.len();
+        )?;
+        self.other_pages = Some(encoded);
         Ok(self)
     }
 
@@ -504,6 +522,11 @@ impl Backgrounds {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.first_page.is_none() && self.other_pages.is_none()
+    }
+
+    fn bytes(&self) -> usize {
+        self.first_page.as_ref().map_or(0, EncodedPdf::bytes)
+            + self.other_pages.as_ref().map_or(0, EncodedPdf::bytes)
     }
 
     /// The wire shape; omitted keys are simply absent.
@@ -1149,7 +1172,8 @@ impl Letter {
                 "at least one background page is required",
             ));
         }
-        let total = self.pdf_bytes + self.attachment_bytes + self.extra_bytes() + backgrounds.bytes;
+        let total =
+            self.pdf_bytes + self.attachment_bytes + self.extra_bytes() + backgrounds.bytes();
         if total > MAX_PDF_BYTES {
             return Err(Error::TooLarge {
                 field: "letter",
@@ -1435,9 +1459,7 @@ impl Letter {
         // `Backgrounds` and `Terms` carry their own byte counts; they are not
         // part of the attachment budget, but they do count towards the per
         // request ceiling.
-        self.backgrounds
-            .as_ref()
-            .map_or(0, |backgrounds| backgrounds.bytes)
+        self.backgrounds.as_ref().map_or(0, Backgrounds::bytes)
             + self.terms.as_ref().map_or(0, Terms::bytes)
     }
 }
@@ -1711,6 +1733,7 @@ fn encode_pdf(field: &'static str, pdf: &[u8], budget: &mut usize) -> Result<Enc
     *budget -= pdf.len();
     Ok(EncodedPdf {
         base64: STANDARD.encode(pdf),
+        bytes: pdf.len(),
     })
 }
 
@@ -1837,6 +1860,12 @@ mod tests {
         b"%PDF-1.4\n".to_vec()
     }
 
+    fn pdf_of_len(len: usize) -> Vec<u8> {
+        let mut bytes = pdf();
+        bytes.resize(len, b'x');
+        bytes
+    }
+
     #[test]
     fn email_validation_covers_every_rejection() {
         for bad in [
@@ -1956,6 +1985,96 @@ mod tests {
                 field: "letter",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn replacing_the_first_background_page_keeps_total_pdf_bytes_exact() {
+        let body = pdf_of_len(64);
+        let old_first_page = pdf_of_len(128);
+        let new_first_page = pdf_of_len(512);
+        let other_pages = pdf_of_len(96);
+
+        let backgrounds = Backgrounds::new()
+            .with_first_page(&old_first_page)
+            .expect("old first page")
+            .with_other_pages(&other_pages)
+            .expect("other pages")
+            .with_first_page(&new_first_page)
+            .expect("replacement first page");
+        let letter = Letter::new(&body)
+            .expect("letter")
+            .with_backgrounds(backgrounds)
+            .expect("backgrounds");
+
+        assert_eq!(
+            letter.total_pdf_bytes(),
+            body.len() + new_first_page.len() + other_pages.len()
+        );
+    }
+
+    #[test]
+    fn replacing_other_background_pages_keeps_total_pdf_bytes_exact() {
+        let body = pdf_of_len(64);
+        let first_page = pdf_of_len(96);
+        let old_other_pages = pdf_of_len(128);
+        let new_other_pages = pdf_of_len(512);
+
+        let backgrounds = Backgrounds::new()
+            .with_first_page(&first_page)
+            .expect("first page")
+            .with_other_pages(&old_other_pages)
+            .expect("old other pages")
+            .with_other_pages(&new_other_pages)
+            .expect("replacement other pages");
+        let letter = Letter::new(&body)
+            .expect("letter")
+            .with_backgrounds(backgrounds)
+            .expect("backgrounds");
+
+        assert_eq!(
+            letter.total_pdf_bytes(),
+            body.len() + first_page.len() + new_other_pages.len()
+        );
+    }
+
+    #[test]
+    fn replacing_a_background_page_enforces_the_exact_request_limit() {
+        let body = pdf_of_len(32);
+        let old_first_page = pdf_of_len(16);
+        let first_page = pdf_of_len(64);
+        let other_pages = pdf_of_len(MAX_PDF_BYTES - body.len() - first_page.len());
+
+        let backgrounds = Backgrounds::new()
+            .with_first_page(&old_first_page)
+            .expect("old first page")
+            .with_other_pages(&other_pages)
+            .expect("other pages")
+            .with_first_page(&first_page)
+            .expect("replacement at the limit");
+        let letter = Letter::new(&body)
+            .expect("letter")
+            .with_backgrounds(backgrounds)
+            .expect("exactly the request limit is accepted");
+        assert_eq!(letter.total_pdf_bytes(), MAX_PDF_BYTES);
+        drop(letter);
+
+        let oversized_first_page = pdf_of_len(first_page.len() + 1);
+        let backgrounds = Backgrounds::new()
+            .with_first_page(&old_first_page)
+            .expect("old first page")
+            .with_other_pages(&other_pages)
+            .expect("other pages")
+            .with_first_page(&oversized_first_page)
+            .expect("background itself remains within its own limit");
+        let letter = Letter::new(&body).expect("letter");
+        assert!(matches!(
+            letter.with_backgrounds(backgrounds),
+            Err(Error::TooLarge {
+                field: "letter",
+                len,
+                max: MAX_PDF_BYTES,
+            }) if len == MAX_PDF_BYTES + 1
         ));
     }
 
