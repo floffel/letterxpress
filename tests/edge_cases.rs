@@ -774,6 +774,54 @@ async fn a_job_list_without_pagination_still_decodes() {
     assert!(page.pagination.is_none());
 }
 
+#[test]
+fn pagination_continuation_prefers_an_explicit_next_page() {
+    // The valid side of the boundary: the page counters still work, and an
+    // explicit next-page link is sufficient even when `last_page` is absent.
+    let by_number: letterxpress::Pagination = serde_json::from_value(serde_json::json!({
+        "current_page": 1,
+        "last_page": 2,
+        "per_page": 1,
+    }))
+    .expect("valid page numbers");
+    assert!(by_number.has_next());
+
+    let by_link: letterxpress::Pagination = serde_json::from_value(serde_json::json!({
+        "current_page": 1,
+        "next_page_url": "https://api.letterxpress.de/v3/invoices?page=2",
+    }))
+    .expect("a next-page link without counts");
+    assert!(by_link.has_next());
+
+    // A sparse block still means "no continuation", not a decode failure.
+    let sparse: letterxpress::Pagination = serde_json::from_value(serde_json::json!({
+        "total": 0,
+    }))
+    .expect("a sparse pagination block");
+    assert!(!sparse.has_next());
+
+    let final_page: letterxpress::Pagination = serde_json::from_value(serde_json::json!({
+        "current_page": 2,
+        "last_page": 2,
+        "per_page": 1,
+        "next_page_url": null,
+    }))
+    .expect("a final page");
+    assert!(!final_page.has_next());
+
+    // The invalid side: supplied counts must support a page calculation and a
+    // logically consistent page sequence.
+    for body in [
+        serde_json::json!({"current_page": 1, "last_page": 3, "per_page": 0}),
+        serde_json::json!({"current_page": 3, "last_page": 2}),
+    ] {
+        assert!(
+            serde_json::from_value::<letterxpress::Pagination>(body).is_err(),
+            "invalid pagination must fail closed"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Flag boundary: numbers and strings share one rule
 // ---------------------------------------------------------------------------
