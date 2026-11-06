@@ -873,6 +873,15 @@ fn every_error_variant_renders_and_classifies() {
         ),
         (
             Error::Transport {
+                kind: TransportKind::ResponseBody,
+                source: Box::new(std::io::Error::other("truncated response body")),
+            },
+            None,
+            false,
+            false,
+        ),
+        (
+            Error::Transport {
                 kind: TransportKind::Protocol,
                 source: Box::new(std::io::Error::other("adapter")),
             },
@@ -963,10 +972,12 @@ fn transport_kinds_display_and_classify() {
     assert_eq!(TransportKind::Connect.to_string(), "connect");
     assert_eq!(TransportKind::Timeout.to_string(), "timeout");
     assert_eq!(TransportKind::Io.to_string(), "io");
+    assert_eq!(TransportKind::ResponseBody.to_string(), "response body");
     assert_eq!(TransportKind::Protocol.to_string(), "protocol");
     assert!(TransportKind::Connect.is_retryable());
     assert!(!TransportKind::Timeout.is_retryable());
     assert!(!TransportKind::Io.is_retryable());
+    assert!(!TransportKind::ResponseBody.is_retryable());
     assert!(!TransportKind::Protocol.is_retryable());
 }
 
@@ -976,6 +987,7 @@ fn transport_kinds_pair_across_the_idempotency_boundary() {
         (TransportKind::Connect, true, true),
         (TransportKind::Timeout, false, true),
         (TransportKind::Io, false, true),
+        (TransportKind::ResponseBody, false, true),
         (TransportKind::Protocol, false, false),
     ] {
         assert_eq!(kind.is_retryable_for(false), submit, "{kind}");
@@ -993,7 +1005,11 @@ fn the_retry_decision_depends_on_the_request_it_belongs_to() {
     assert!(!upstream.is_retryable_for(Method::Post.is_idempotent()));
     assert!(!upstream.is_retryable(), "the submit answer is the default");
 
-    for kind in [TransportKind::Timeout, TransportKind::Io] {
+    for kind in [
+        TransportKind::Timeout,
+        TransportKind::Io,
+        TransportKind::ResponseBody,
+    ] {
         let broken = Error::Transport {
             kind,
             source: Box::new(std::io::Error::other("mid-flight failure")),

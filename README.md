@@ -155,7 +155,7 @@ the request exactly once and never retries it.
 | --- | --- | --- |
 | `Error::RateLimited` | 429 over HTTP or in the body, rejected before processing | wait `error.retry_after()` (never more than 1 hour) and retry; `None` means no usable header — back off exponentially |
 | `Error::Transport { kind: Connect, .. }` | nothing was written | safe to retry |
-| `Error::Transport { kind: Timeout \| Io, .. }` on a **submit** | promoted to `Error::Ambiguous` | reconcile, then resubmit |
+| `Error::Transport { kind: Timeout \| Io \| ResponseBody, .. }` on a **submit** | promoted to `Error::Ambiguous` — the request may have been written, and the response failed | reconcile, then resubmit |
 | `Error::Upstream` on a **submit** (5xx) | promoted to `Error::Ambiguous` | reconcile, then resubmit |
 | `Error::UnexpectedStatus` on a **submit** (1xx/3xx) | promoted to `Error::Ambiguous` — the request may have been processed; redirects are not followed | reconcile, then resubmit |
 | `Error::Json` / `MissingField` / `UnexpectedShape` on a **submit** (2xx with an undecodable body) | promoted to `Error::Ambiguous` — the job exists, its tracking data does not decode | reconcile (list `print_jobs`), then resubmit only if absent |
@@ -169,6 +169,10 @@ failed: a 429, a connection that never reached the provider, and — for a read,
 conservative alias for `is_retryable_for(false)`, so a submit is only ever
 retried when nothing can have been billed; `retry_after()` adds the provider's
 own backoff hint when it sent one. `is_ambiguous()` is true only for
+`Ambiguous`. `TransportKind::Protocol` means the request could not be built
+locally, before it reached the provider, and is never retryable.
+`TransportKind::ResponseBody` means the provider had answered but reading or
+decoding its body failed; a read may retry it, while a submit is promoted to
 `Ambiguous`. Reads (`GET`), `PUT` and `DELETE` are treated as idempotent and
 never promoted to `Ambiguous`. `Error::Ambiguous` carries an `AmbiguousKind`
 and `Error::status()` returns the numeric HTTP status for an `Upstream` kind,

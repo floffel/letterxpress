@@ -74,7 +74,10 @@
 //!   drive [`MockTransport`](crate::transport::MockTransport) and
 //!   [`RecordingTransport`](crate::transport::RecordingTransport).
 //! * **No hidden retries.** A submit that may have reached the provider returns
-//!   [`Error::Ambiguous`]; the caller reconciles before resubmitting.
+//!   [`Error::Ambiguous`]; the caller reconciles before resubmitting. A
+//!   response body that fails after the provider answered is
+//!   [`TransportKind::ResponseBody`], not the pre-write
+//!   [`TransportKind::Protocol`] failure.
 //! * **Typed causes.** The variants that wrap a lower-level failure —
 //!   [`Error::Json`], [`Error::UnexpectedShape`], [`Error::Transport`] and
 //!   [`Error::Base64`] — keep it as `source`, so a `source()` walk (and the

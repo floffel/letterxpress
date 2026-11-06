@@ -964,6 +964,84 @@ async fn a_submit_timeout_is_ambiguous_and_sent_once() {
 }
 
 #[tokio::test]
+async fn a_submit_response_body_failure_is_ambiguous_and_sent_once() {
+    let recorder = letterxpress::transport::RecordingTransport::new(MockTransport::new([Err(
+        Error::Transport {
+            kind: TransportKind::ResponseBody,
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "response body ended before its declared length",
+            )),
+        },
+    )]));
+    let client = Client::new(
+        recorder.clone(),
+        Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
+    );
+
+    let error = client
+        .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+        .await
+        .expect_err("must fail");
+
+    assert!(
+        error.is_ambiguous(),
+        "the POST may already be billed: {error:?}"
+    );
+    assert!(!error.is_retryable());
+    assert_eq!(
+        error.status(),
+        None,
+        "no complete response carried a status"
+    );
+    assert!(
+        matches!(
+            error,
+            Error::Ambiguous {
+                kind: AmbiguousKind::Io,
+                ..
+            }
+        ),
+        "a failed response body is a post-write I/O failure: {error:?}"
+    );
+    assert_eq!(
+        recorder.requests().len(),
+        1,
+        "the client never retries a submit"
+    );
+}
+
+#[tokio::test]
+async fn a_read_response_body_failure_stays_a_retryable_transport_error() {
+    let client = Client::new(
+        MockTransport::new([Err(Error::Transport {
+            kind: TransportKind::ResponseBody,
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        })]),
+        Credentials::new("kunde", "key", Mode::Test).expect("credentials"),
+    );
+
+    let error = client.balance().await.expect_err("must fail");
+
+    assert!(!error.is_ambiguous(), "a read created nothing: {error:?}");
+    assert!(
+        !error.is_retryable(),
+        "the context-free answer is for a submit"
+    );
+    assert!(
+        error.is_retryable_for(Method::Get.is_idempotent()),
+        "the same failure on a read is safe to repeat"
+    );
+    assert!(matches!(
+        error,
+        Error::Transport {
+            kind: TransportKind::ResponseBody,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn a_submit_connection_failure_is_not_ambiguous() {
     let client = Client::new(
         MockTransport::new([Err(Error::Transport {
@@ -991,6 +1069,39 @@ async fn a_submit_connection_failure_is_not_ambiguous() {
         "a connect-phase failure stays a plain transport error: {error:?}"
     );
     assert!(error.is_retryable_for(Method::Post.is_idempotent()));
+}
+
+#[tokio::test]
+async fn a_pre_write_protocol_failure_stays_terminal_for_submit_and_read() {
+    for run_read in [false, true] {
+        let client = Client::new(
+            MockTransport::new([Err(Error::Transport {
+                kind: TransportKind::Protocol,
+                source: Box::new(std::io::Error::other("request was not built")),
+            })]),
+            Credentials::new("kunde", "key", Mode::Live).expect("credentials"),
+        );
+
+        let error = if run_read {
+            client.balance().await.expect_err("read must fail")
+        } else {
+            client
+                .submit_print_job(&Letter::new(&pdf()).expect("letter"))
+                .await
+                .expect_err("submit must fail")
+        };
+
+        assert!(!error.is_ambiguous(), "nothing was written: {error:?}");
+        assert!(!error.is_retryable());
+        assert!(!error.is_retryable_for(Method::Get.is_idempotent()));
+        assert!(matches!(
+            error,
+            Error::Transport {
+                kind: TransportKind::Protocol,
+                ..
+            }
+        ));
+    }
 }
 
 #[tokio::test]

@@ -31,10 +31,11 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Why a transport call produced no response.
+/// Why a transport call produced no complete response.
 ///
-/// The distinction matters: a connection that was never established cannot have
-/// submitted a letter, a request that timed out after being written may have.
+/// The distinction matters: a connection that was never established or a
+/// request that could not be built cannot have submitted a letter, while a
+/// request that timed out or failed while reading its response may have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TransportKind {
@@ -56,7 +57,8 @@ pub enum TransportKind {
     /// assert!(!TransportKind::Timeout.is_retryable());
     /// ```
     Timeout,
-    /// The connection broke mid-flight (reset, truncated body, TLS alert).
+    /// The connection broke while sending the request or waiting for the
+    /// response headers (reset, TLS alert).
     ///
     /// ```
     /// use letterxpress::TransportKind;
@@ -65,8 +67,22 @@ pub enum TransportKind {
     /// assert!(!TransportKind::Io.is_retryable());
     /// ```
     Io,
+    /// The provider answered, but reading or decoding its response body failed
+    /// after the request had been written.
+    ///
+    /// This is distinct from [`TransportKind::Protocol`]: the request may have
+    /// been processed before the response was truncated, reset, or failed to
+    /// decode.
+    ///
+    /// ```
+    /// use letterxpress::TransportKind;
+    ///
+    /// assert!(TransportKind::ResponseBody.is_retryable_for(true));
+    /// assert!(!TransportKind::ResponseBody.is_retryable());
+    /// ```
+    ResponseBody,
     /// The transport refused to build the request — a local configuration or
-    /// adapter problem, never a server answer.
+    /// adapter problem, before any bytes were written.
     ///
     /// ```
     /// use letterxpress::TransportKind;
@@ -101,10 +117,10 @@ impl TransportKind {
     /// idempotent.
     ///
     /// A connection that was never established wrote nothing, so it is safe
-    /// whatever the request was. A timeout or a broken connection may have
-    /// delivered the request: safe for a read, duplicate-prone for a submit.
-    /// An adapter that refused to build the request fails the same way again,
-    /// so it is never retryable.
+    /// whatever the request was. A timeout, a broken connection, or a failed
+    /// response body may have followed a delivered request: safe for a read,
+    /// duplicate-prone for a submit. An adapter that refused to build the
+    /// request fails the same way again, so it is never retryable.
     ///
     /// ```
     /// use letterxpress::{Method, TransportKind};
@@ -120,7 +136,7 @@ impl TransportKind {
     pub fn is_retryable_for(self, idempotent: bool) -> bool {
         match self {
             Self::Connect => true,
-            Self::Timeout | Self::Io => idempotent,
+            Self::Timeout | Self::Io | Self::ResponseBody => idempotent,
             Self::Protocol => false,
         }
     }
@@ -132,6 +148,7 @@ impl std::fmt::Display for TransportKind {
             Self::Connect => "connect",
             Self::Timeout => "timeout",
             Self::Io => "io",
+            Self::ResponseBody => "response body",
             Self::Protocol => "protocol",
         };
         f.write_str(text)
@@ -299,6 +316,7 @@ pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
 /// | [`Error::Transport`] / `Connect` | none | yes | yes | no | no |
 /// | [`Error::Transport`] / `Timeout` | none | no | yes | no | no |
 /// | [`Error::Transport`] / `Io` | none | no | yes | no | no |
+/// | [`Error::Transport`] / `ResponseBody` | none | no | yes | no | no |
 /// | [`Error::Transport`] / `Protocol` | none | no | no | no | no |
 /// | [`Error::Json`] | none | no | no | no | no |
 /// | [`Error::MissingField`] | none | no | no | no | no |
@@ -335,10 +353,12 @@ pub(crate) fn bounded_retry_after(wait: Duration) -> Duration {
 ///   means the provider answered and that code is what [`Error::status`]
 ///   returns.
 /// * `Transport` — a connection that was never established (`Connect`) cannot
-///   have submitted a letter, so it is retryable in both contexts. `Timeout`
-///   and `Io` may have delivered the request: retryable for a read only. The
-///   client already promotes those two on a submit to [`Error::Ambiguous`]; the
-///   predicate agrees with that rewrite instead of contradicting it.
+///   have submitted a letter, so it is retryable in both contexts. `Timeout`,
+///   `Io` and `ResponseBody` may have followed a delivered request: retryable
+///   for a read only. The client already promotes those three on a submit to
+///   [`Error::Ambiguous`]; the predicate agrees with that rewrite instead of
+///   contradicting it. `Protocol` is only for a request that failed to build,
+///   so it is never retryable.
 /// * `Json`, `MissingField`, `UnexpectedShape` — the answer was unusable. On a
 ///   submit the client reports [`Error::Ambiguous`] instead, because a 2xx
 ///   means the job exists and is billed. `Json` carries no status because it is
@@ -532,13 +552,17 @@ pub enum Error {
         message: String,
     },
 
-    /// No response was obtained from the provider.
+    /// No complete response was obtained from the provider.
     ///
     /// `source` is the transport's own failure — `reqwest`/`hyper`/`rustls`
     /// with the real stack, or whatever a custom
     /// [`Transport`](crate::transport::Transport) implementation returns — kept
     /// typed instead of flattened into a string, so `source()` and the
     /// `anyhow`/`tracing` walks built on it reach the DNS, TLS or reset detail.
+    /// [`kind`](Error::Transport::kind) says whether the request failed before
+    /// it was built (`Protocol`), before a connection was established
+    /// (`Connect`), or after it may have been delivered (`Timeout`, `Io`, or
+    /// `ResponseBody`).
     ///
     /// ```
     /// use letterxpress::{Error, TransportKind};
@@ -1226,6 +1250,15 @@ mod tests {
                 transport_error(TransportKind::Io, "connection reset"),
             ),
             row(
+                "[`Error::Transport`] / `ResponseBody`",
+                "none",
+                false,
+                true,
+                false,
+                false,
+                transport_error(TransportKind::ResponseBody, "truncated response body"),
+            ),
+            row(
                 "[`Error::Transport`] / `Protocol`",
                 "none",
                 false,
@@ -1422,8 +1455,8 @@ mod tests {
         assert_eq!(labels.len(), rows.len(), "two rows share a label");
         assert_eq!(
             rows.len(),
-            VARIANTS.len() + 5,
-            "the four `Transport` kinds and the three `Ambiguous` kinds are the only repeats"
+            VARIANTS.len() + 6,
+            "the five `Transport` kinds and the three `Ambiguous` kinds are the only repeats"
         );
     }
 
@@ -1434,6 +1467,7 @@ mod tests {
         TransportKind::Connect,
         TransportKind::Timeout,
         TransportKind::Io,
+        TransportKind::ResponseBody,
         TransportKind::Protocol,
     ];
 
@@ -1444,11 +1478,12 @@ mod tests {
             TransportKind::Connect => "Connect",
             TransportKind::Timeout => "Timeout",
             TransportKind::Io => "Io",
+            TransportKind::ResponseBody => "ResponseBody",
             TransportKind::Protocol => "Protocol",
         }
     }
 
-    /// The four `Transport` rows are one per kind, labelled exactly as the
+    /// The five `Transport` rows are one per kind, labelled exactly as the
     /// table spells them, and each one answers like the kind it classifies.
     /// `TransportKind` is `#[non_exhaustive]` as well, so this is the check
     /// that would catch a kind added without a row.
@@ -1495,7 +1530,7 @@ mod tests {
                 "`{label}`: `Display` names the kind the table names"
             );
             assert_eq!(
-                kind.to_string(),
+                kind.to_string().replace(' ', ""),
                 kind_name(*kind).to_ascii_lowercase(),
                 "`{label}`: `Display` spells the kind the way the row does"
             );
@@ -1568,7 +1603,8 @@ mod tests {
     }
 
     /// Only the failures that may arrive after the provider acted depend on
-    /// the request: a 5xx answer, a timeout and a broken connection. Every
+    /// the request: a 5xx answer, a timeout, a broken connection and a broken
+    /// response body. Every
     /// other row answers the same for a submit and for a read.
     #[test]
     fn only_a_5xx_and_a_mid_flight_failure_depend_on_the_context() {
@@ -1580,8 +1616,8 @@ mod tests {
 
         assert_eq!(
             differing.len(),
-            3,
-            "exactly `Upstream` and the two mid-flight kinds differ: {:?}",
+            4,
+            "exactly `Upstream` and the three post-write kinds differ: {:?}",
             differing.iter().map(|row| row.label).collect::<Vec<_>>()
         );
         for row in &differing {
@@ -1592,7 +1628,11 @@ mod tests {
         assert!(differing
             .iter()
             .any(|row| matches!(&row.error, Error::Upstream { .. })));
-        for kind in [TransportKind::Timeout, TransportKind::Io] {
+        for kind in [
+            TransportKind::Timeout,
+            TransportKind::Io,
+            TransportKind::ResponseBody,
+        ] {
             assert!(differing.iter().any(|row| matches!(
                 &row.error,
                 Error::Transport { kind: actual, .. } if *actual == kind

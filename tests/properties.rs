@@ -856,6 +856,7 @@ proptest! {
             Just(TransportKind::Connect),
             Just(TransportKind::Timeout),
             Just(TransportKind::Io),
+            Just(TransportKind::ResponseBody),
             Just(TransportKind::Protocol),
         ],
     ) {
@@ -1068,6 +1069,7 @@ fn transport_kind_strategy() -> impl Strategy<Value = TransportKind> {
         Just(TransportKind::Connect),
         Just(TransportKind::Timeout),
         Just(TransportKind::Io),
+        Just(TransportKind::ResponseBody),
         Just(TransportKind::Protocol),
     ]
 }
