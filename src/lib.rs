@@ -156,8 +156,8 @@ mod types;
 pub mod transport;
 
 pub use client::{
-    Client, EmailJobQuery, EmailJobUpdate, JournalFilter, PrintJobQuery, PrintJobUpdate,
-    TransactionQuery, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, RATE_LIMIT_PER_MINUTE,
+    Client, EmailJobQuery, EmailJobUpdate, InvoiceQuery, JournalFilter, PrintJobQuery,
+    PrintJobUpdate, TransactionQuery, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, RATE_LIMIT_PER_MINUTE,
 };
 pub use credentials::{Credentials, Mode};
 pub use date::Date;

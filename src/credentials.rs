@@ -291,6 +291,7 @@ fn validate_token(field: &'static str, value: &str, max: usize) -> Result<(), Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn mode_reports_whether_it_spends_money() {
@@ -475,5 +476,101 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn accepts_exactly(value: &str, max: usize) -> bool {
+        !value.is_empty()
+            && value.len() <= max
+            && value
+                .chars()
+                .all(|character| character.is_ascii_graphic() || character == ' ')
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Token acceptance is exactly the conjunction of its three documented
+        /// clauses: non-empty, within the bound, and ASCII graphic or space.
+        #[test]
+        fn token_validation_matches_its_complete_contract(
+            value in proptest::collection::vec(any::<char>(), 0..600),
+            max in 0usize..=512,
+        ) {
+            let value: String = value.into_iter().collect();
+            prop_assert_eq!(
+                validate_token("field", &value, max).is_ok(),
+                accepts_exactly(&value, max),
+                "value={:?}, max={}, bytes={}",
+                value,
+                max,
+                value.len(),
+            );
+        }
+
+        /// The bound is exercised at exactly `max` and `max + 1` characters,
+        /// including multi-byte and Unicode format-class code points.
+        #[test]
+        fn token_validation_boundaries_cover_multibyte_and_format_classes(
+            max in 1usize..=64,
+            character in prop_oneof![
+                Just('a'),
+                Just(' '),
+                Just('ä'),
+                Just('\u{200B}'),
+                Just('\u{202E}'),
+                Just('\t'),
+            ],
+        ) {
+            let at_limit: String = std::iter::repeat_n(character, max).collect();
+            let above_limit: String = std::iter::repeat_n(character, max + 1).collect();
+
+            prop_assert_eq!(
+                validate_token("field", &at_limit, max).is_ok(),
+                accepts_exactly(&at_limit, max),
+                "character={:?}, max={}",
+                character,
+                max,
+            );
+            prop_assert!(!accepts_exactly(&above_limit, max));
+            prop_assert!(validate_token("field", &above_limit, max).is_err());
+        }
+
+        /// Every mode round-trips through its canonical wire spelling, with
+        /// arbitrary ASCII case and surrounding whitespace accepted.
+        #[test]
+        fn mode_round_trips_through_every_supported_spelling(
+            mode in prop_oneof![Just(Mode::Test), Just(Mode::Live)],
+            uppercase in any::<bool>(),
+            before in proptest::option::of("[ \t\n]{1,8}"),
+            after in proptest::option::of("[ \t\n]{1,8}"),
+        ) {
+            let spelling = if uppercase {
+                mode.as_str().to_ascii_uppercase()
+            } else {
+                mode.as_str().to_owned()
+            };
+            let input = format!(
+                "{}{spelling}{}",
+                before.as_deref().unwrap_or_default(),
+                after.as_deref().unwrap_or_default(),
+            );
+
+            prop_assert_eq!(mode.to_string(), mode.as_str());
+            prop_assert!(matches!(input.parse::<Mode>(), Ok(parsed) if parsed == mode));
+        }
+
+        /// Arbitrary text parses to exactly the two case-insensitive, trimmed
+        /// spellings and never to a third value.
+        #[test]
+        fn mode_parsing_matches_the_supported_vocabulary(text in "\\PC{0,100}") {
+            let expected = if text.trim().eq_ignore_ascii_case("test") {
+                Some(Mode::Test)
+            } else if text.trim().eq_ignore_ascii_case("live") {
+                Some(Mode::Live)
+            } else {
+                None
+            };
+            prop_assert_eq!(text.parse::<Mode>().ok(), expected, "text={:?}", text);
+        }
     }
 }
