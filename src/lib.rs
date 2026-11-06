@@ -64,12 +64,14 @@
 //!   registered-mail rule, future dispatch dates and the
 //!   `email_letter`/`serial_letter` exclusivity. A typo costs a local error,
 //!   not a billed letter.
-//! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
-//!   carried ([`JobStatus::Other`]), scalars are accepted as strings or numbers,
-//!   and both `snake_case` and `camelCase` keys decode. Request-side vocabularies
-//!   keep the carried value for inspection but reject it in serialization and
-//!   request builders, so a value this crate does not model never reaches the
-//!   wire.
+//! * **Parse without inventing data.** Unknown fields are ignored, unknown
+//!   enum strings are carried ([`JobStatus::Other`]), text and ids accept their
+//!   documented scalar spellings, and both `snake_case` and `camelCase` keys
+//!   decode. Status-like enums accept JSON strings only; a null or other JSON
+//!   shape in a present status field is a decode error, never a fabricated
+//!   value. Request-side vocabularies keep a carried value for inspection but
+//!   reject it in serialization and request builders, so a value this crate
+//!   does not model never reaches the wire.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the tests
 //!   drive [`MockTransport`](crate::transport::MockTransport) and
 //!   [`RecordingTransport`](crate::transport::RecordingTransport).

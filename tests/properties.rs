@@ -341,6 +341,16 @@ proptest! {
         prop_assert_eq!(status.clone(), again);
     }
 
+    /// Every unknown wire string survives a JSON round trip unchanged, and a
+    /// known spelling resolves back to the same typed value.
+    #[test]
+    fn unknown_status_strings_round_trip(raw in "\\PC{0,40}") {
+        let status = JobStatus::from_wire(&raw);
+        let encoded = serde_json::to_string(&status).expect("serialize");
+        let decoded: JobStatus = serde_json::from_str(&encoded).expect("deserialize");
+        prop_assert_eq!(decoded, status);
+    }
+
     /// Known enum spellings are recognised in any case and with any padding.
     #[test]
     fn known_enum_values_survive_case_and_padding(
