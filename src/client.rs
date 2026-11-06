@@ -818,6 +818,15 @@ impl PrintJobUpdate {
         }
     }
 
+    /// Checks every request-side enum stored in this update.
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.specification.validate()?;
+        if let Some(registered) = &self.registered {
+            registered.to_request("registered")?;
+        }
+        Ok(())
+    }
+
     /// Plans dispatch for `date`, which must be after `today`.
     ///
     /// # Errors
@@ -851,13 +860,15 @@ impl PrintJobUpdate {
     ///
     /// ```
     /// # use letterxpress::{PrintJobUpdate, Registered, Shipping, Specification};
-    /// let national = Specification::new().with_shipping(Shipping::National);
+    /// let national = Specification::new().with_shipping(Shipping::National)?;
     /// assert!(PrintJobUpdate::new(national).with_registered(Registered::Einschreiben).is_ok());
     ///
-    /// let international = Specification::new().with_shipping(Shipping::International);
+    /// let international = Specification::new().with_shipping(Shipping::International)?;
     /// assert!(PrintJobUpdate::new(international).with_registered(Registered::Einschreiben).is_err());
+    /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self> {
+        registered.to_request("registered")?;
         crate::letter::check_registered_shipping(
             "letter.registered",
             Some(&registered),
@@ -907,6 +918,12 @@ impl PrintJobUpdate {
     /// let json = PrintJobUpdate::new(Specification::new()).to_json();
     /// assert!(json.get("dispatch_date").is_none());
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is broken and an unknown request value
+    /// is stored without validation. Public builders and the client boundary
+    /// reject those values.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut map = Map::new();
@@ -917,7 +934,12 @@ impl PrintJobUpdate {
         if let Some(registered) = &self.registered {
             map.insert(
                 "registered".to_string(),
-                Value::String(registered.as_str().to_string()),
+                Value::String(
+                    registered
+                        .to_request("registered")
+                        .expect("stored registration is known")
+                        .to_string(),
+                ),
             );
         }
         if let Some(notice) = &self.notice {
@@ -1144,6 +1166,7 @@ impl<T: Transport> Client<T> {
     /// the provider's answer mapped as described on [`Error`] — including
     /// [`Error::Ambiguous`] when a submit may have been processed.
     pub async fn update_print_job(&self, id: &JobId, update: &PrintJobUpdate) -> Result<PrintJob> {
+        update.validate()?;
         let body = json!({ "letter": update.to_json() });
         let envelope = self
             .call(

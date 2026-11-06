@@ -4,10 +4,12 @@
 //! Decoding is deliberately permissive: an unknown value is carried in
 //! `Other(String)` after trimming and ASCII-lowercasing instead of failing the
 //! whole response, so a new provider status cannot take a client offline.
-//! Encoding is strict for request-side
-//! enums ([`JobFilter`], [`TransactionFilter`], [`JournalType`]) — those have
-//! no `Other`, because guessing a filter value would silently return the wrong
-//! result set.
+//! Encoding is strict for request-side values. [`Color`], [`PrintMode`],
+//! [`Shipping`], [`Registered`] and [`EmailOption`] keep `Other` so responses
+//! can be decoded permissively, but serde serialization and the explicit
+//! `to_request` conversion reject it. [`JobFilter`], [`TransactionFilter`] and
+//! [`JournalType`] have no `Other` at all, because guessing a filter value
+//! would silently return the wrong result set.
 
 use std::fmt;
 use std::str::FromStr;
@@ -20,6 +22,8 @@ use crate::Error;
 /// Generates a string-valued wire enum with a carry-all variant.
 macro_rules! wire_enum {
     (
+        request = $request_field:literal,
+        strict = $strict:literal,
         $(#[$meta:meta])*
         $name:ident {
             $(
@@ -90,6 +94,34 @@ macro_rules! wire_enum {
                 )+
                 Self::Other(normalized.to_ascii_lowercase())
             }
+
+            /// Converts this value to the documented request spelling.
+            ///
+            /// Only modelled variants are valid in an outbound request.
+            /// [`Self::Other`] remains available for permissive response
+            /// decoding, but is rejected here instead of being copied onto the
+            /// wire.
+            ///
+            /// ```
+            #[doc = concat!("# use letterxpress::", stringify!($name), ";")]
+            #[doc = concat!("assert!(<", stringify!($name), ">::from_wire(\"unknown\").to_request(\"request\").is_err());")]
+            /// ```
+            ///
+            /// # Errors
+            ///
+            /// [`Error::Validation`] when this is [`Self::Other`].
+            pub fn to_request(&self, field: &'static str) -> Result<&'static str, Error> {
+                match self {
+                    $(Self::$variant => Ok($wire),)+
+                    Self::Other(raw) => Err(Error::invalid(
+                        field,
+                        format!(
+                            concat!("unknown ", stringify!($name), " request value: {:?}"),
+                            raw
+                        ),
+                    )),
+                }
+            }
         }
 
         impl fmt::Display for $name {
@@ -100,7 +132,12 @@ macro_rules! wire_enum {
 
         impl Serialize for $name {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.serialize_str(self.as_str())
+                let value = if $strict {
+                    self.to_request($request_field).map_err(serde::ser::Error::custom)?
+                } else {
+                    self.as_str()
+                };
+                serializer.serialize_str(value)
             }
         }
 
@@ -158,6 +195,8 @@ impl Visitor<'_> for WireVisitor {
 }
 
 wire_enum! {
+    request = "color",
+    strict = true,
     /// Print colour, sent as `specification.color`.
     ///
     /// The wire values are the strings `"1"` and `"4"`, not colour names —
@@ -180,6 +219,8 @@ wire_enum! {
 }
 
 wire_enum! {
+    request = "mode",
+    strict = true,
     /// Print sides, sent as `specification.mode`.
     ///
     /// ```
@@ -197,6 +238,8 @@ wire_enum! {
 }
 
 wire_enum! {
+    request = "shipping",
+    strict = true,
     /// Shipping class, sent as `specification.shipping`.
     ///
     /// `Auto` leaves the decision to the provider and is the safest default
@@ -219,6 +262,8 @@ wire_enum! {
 }
 
 wire_enum! {
+    request = "registered",
+    strict = true,
     /// Registered-mail option, sent as `registered`.
     ///
     /// Registered mail is **national only**; the builder rejects it for
@@ -239,6 +284,8 @@ wire_enum! {
 }
 
 wire_enum! {
+    request = "email_option",
+    strict = true,
     /// SMART@MAIL delivery option, sent as `email_letter.email_option`.
     ///
     /// ```
@@ -258,6 +305,8 @@ wire_enum! {
 }
 
 wire_enum! {
+    request = "status",
+    strict = false,
     /// Job state, as reported on print jobs, print items and e-mail jobs.
     ///
     /// The provider documents no state machine, only this vocabulary (from the

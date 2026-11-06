@@ -154,6 +154,14 @@ Filter vocabularies:
 | `transactions` | `payins`, `payouts`, `printjobs` | p. 30 | verified |
 | `journal` (`filter.type`) | `print`, `maildirect`, `mailsecure`, `mailplus` | p. 29 | verified |
 
+Request-side scalar vocabularies are closed even though response decoding is
+permissive. The documented values are `color` `1`/`4`, `mode`
+`simplex`/`duplex`, `shipping` `national`/`international`/`auto`, `registered`
+`r1`/`r2`, and `email_option` `maildirect`/`mailplus`/`mailsecure`. Unknown
+response tokens remain available as `Other(String)` for inspection, but
+`to_request`, serde serialization, and every builder that accepts one of these
+values reject `Other` with a local `Error::Validation` before the wire.
+
 The `GET` examples carry JSON request bodies even though RFC 9110 assigns no
 defined semantics to GET content. This provider is an explicit exception: its
 `auth` object is required in the body on every verb, and `GET /v3/price` places

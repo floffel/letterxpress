@@ -119,7 +119,9 @@ async fn submit_print_job_posts_the_full_letter_object() {
         recording(r#"{"status":200,"message":"OK","data":{"id":7,"status":"queue","items":[]}}"#);
     let letter = letter()
         .with_color(letterxpress::Color::Color)
+        .expect("color")
         .with_print_mode(letterxpress::PrintMode::Duplex)
+        .expect("print mode")
         .with_shipping(Shipping::National)
         .expect("national shipping")
         .with_c4_envelope(true)
@@ -157,14 +159,18 @@ async fn submit_print_job_posts_the_full_letter_object() {
 async fn update_print_job_puts_only_the_mutable_fields() {
     let (client, recorder) =
         recording(r#"{"status":200,"message":"OK","data":{"id":5,"status":"queue","items":[]}}"#);
-    let update = PrintJobUpdate::new(Specification::new().with_shipping(Shipping::National))
-        .with_dispatch_date(
-            Date::new(2026, 11, 2).expect("date"),
-            Date::new(2026, 10, 24).expect("today"),
-        )
-        .expect("dispatch date")
-        .with_registered(Registered::EinschreibenEinwurf)
-        .expect("registered");
+    let update = PrintJobUpdate::new(
+        Specification::new()
+            .with_shipping(Shipping::National)
+            .expect("national shipping"),
+    )
+    .with_dispatch_date(
+        Date::new(2026, 11, 2).expect("date"),
+        Date::new(2026, 10, 24).expect("today"),
+    )
+    .expect("dispatch date")
+    .with_registered(Registered::EinschreibenEinwurf)
+    .expect("registered");
     client
         .update_print_job(&JobId::new("5").expect("id"), &update)
         .await

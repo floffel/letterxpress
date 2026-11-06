@@ -16,6 +16,11 @@ All notable changes to this project are documented here.
   `Result<Option<Money>, MoneyError>`; `Some(Money::ZERO)` means a reported zero,
   while `None` means the amount was not reported.
 
+- Reject unknown `Color`, `PrintMode`, `Shipping`, `Registered` and
+  `EmailOption` values in request builders and serde serialization. Unknown
+  response tokens still decode into `Other(String)` for inspection; the explicit
+  `to_request` conversion and the affected setters now return a typed validation
+  error rather than sending provider-impossible values.
 - Send journal filters as percent-encoded query parameters, leaving only the
   provider-mandated `auth` object in the GET body. Reject accidental GET
   endpoint payloads except for the documented `/price` request.

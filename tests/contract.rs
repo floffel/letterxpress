@@ -119,7 +119,9 @@ async fn registered_print_job_keeps_its_tracking_code() {
 async fn updated_print_job_shows_the_new_options() {
     let client = client_with(vec![fixture_response("printjob_update.json")]);
     let update = letterxpress::PrintJobUpdate::new(
-        letterxpress::Specification::new().with_color(Color::Color),
+        letterxpress::Specification::new()
+            .with_color(Color::Color)
+            .expect("color"),
     )
     .with_notice("KdNr. xxxxx")
     .expect("notice");
