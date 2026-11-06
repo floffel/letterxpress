@@ -265,16 +265,14 @@ proptest! {
         );
     }
 
-    /// Ordering by day count agrees with ordering by fields.
+    /// Ordering compares the civil `(year, month, day)` tuple directly, so it
+    /// agrees with field order across the whole supported range.
     #[test]
-    fn date_ordering_is_consistent(
-        a in (1970u16..9999, 1u8..=12, 1u8..=28),
-        b in (1970u16..9999, 1u8..=12, 1u8..=28)
-    ) {
-        let left = Date::new(a.0, a.1, a.2).expect("date");
-        let right = Date::new(b.0, b.1, b.2).expect("date");
-        prop_assert_eq!(left.cmp(&right), left.days_since_epoch().cmp(&right.days_since_epoch()));
-        prop_assert_eq!(left.is_after(&right), left.days_since_epoch() > right.days_since_epoch());
+    fn date_ordering_matches_the_civil_tuple(a in valid_date(), b in valid_date()) {
+        let left_fields = (a.year(), a.month(), a.day());
+        let right_fields = (b.year(), b.month(), b.day());
+        prop_assert_eq!(a.cmp(&b), left_fields.cmp(&right_fields));
+        prop_assert_eq!(a.is_after(&b), left_fields > right_fields);
     }
 
     /// The response parser never panics, whatever bytes arrive.

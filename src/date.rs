@@ -2,9 +2,9 @@
 //!
 //! [`Date`] is a thin wrapper around [`jiff::civil::Date`], restricted to the
 //! provider's `1970..=9999` range. The maintained library owns the proleptic
-//! Gregorian calendar, leap years, month lengths, chronological ordering and
-//! ISO rendering; this wrapper keeps the strict `yyyy-mm-dd` wire shape and
-//! maps failures to [`Error`].
+//! Gregorian calendar, leap years, month lengths and ISO rendering; this
+//! wrapper keeps the strict `yyyy-mm-dd` wire shape, maps failures to
+//! [`Error`], and orders dates by their civil fields.
 //!
 //! ```
 //! use letterxpress::Date;
@@ -13,9 +13,13 @@
 //! assert_eq!(date.to_string(), "2027-02-28");
 //! assert!(Date::parse("2027-02-29").is_err()); // not a leap year
 //! assert!(date.is_after(&Date::parse("2027-02-27")?));
+//! assert!(Date::parse("2023-12-31")? < Date::parse("2024-01-01")?);
+//! assert!(Date::parse("2024-02-28")? < Date::parse("2024-02-29")?);
+//! assert!(Date::parse("2024-02-29")? < Date::parse("2024-03-01")?);
 //! # Ok::<(), letterxpress::Error>(())
 //! ```
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
@@ -36,7 +40,7 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// assert!(Date::new(2026, 2, 29).is_err());
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Date(CivilDate);
 
 impl Date {
@@ -157,9 +161,12 @@ impl Date {
     /// ```
     /// use letterxpress::Date;
     ///
-    /// let today = Date::new(2026, 10, 24).unwrap();
-    /// assert!(Date::new(2026, 10, 25).unwrap().is_after(&today));
+    /// let today = Date::new(2026, 10, 24)?;
+    /// assert!(Date::new(2026, 10, 25)?.is_after(&today));
     /// assert!(!today.is_after(&today));
+    /// assert!(Date::new(2024, 1, 1)?.is_after(&Date::new(2023, 12, 31)?));
+    /// assert!(Date::new(2024, 3, 1)?.is_after(&Date::new(2024, 2, 29)?));
+    /// # Ok::<(), letterxpress::Error>(())
     /// ```
     #[must_use]
     pub fn is_after(self, other: &Self) -> bool {
@@ -167,7 +174,8 @@ impl Date {
     }
 
     /// Days since 1970-01-01, valid for `1970-01-01..=9999-12-31`, the range
-    /// [`Date::new`] accepts. Used for ordering tests and cheap range checks.
+    /// [`Date::new`] accepts. Used for cheap range checks; ordering compares the
+    /// civil fields directly.
     ///
     /// ```
     /// use letterxpress::Date;
@@ -240,6 +248,44 @@ impl FromStr for Date {
     }
 }
 
+impl Ord for Date {
+    /// Orders dates by their civil `(year, month, day)` fields.
+    ///
+    /// ```
+    /// use letterxpress::Date;
+    ///
+    /// let end_of_year = Date::new(2023, 12, 31)?;
+    /// let new_year = Date::new(2024, 1, 1)?;
+    /// let leap_day = Date::new(2024, 2, 29)?;
+    ///
+    /// assert!(end_of_year < new_year);
+    /// assert!(Date::new(2024, 2, 28)? < leap_day);
+    /// assert!(leap_day < Date::new(2024, 3, 1)?);
+    /// # Ok::<(), letterxpress::Error>(())
+    /// ```
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.year(), self.month(), self.day()).cmp(&(other.year(), other.month(), other.day()))
+    }
+}
+
+impl PartialOrd for Date {
+    /// Returns the civil-field order defined by [`Ord::cmp`].
+    ///
+    /// ```
+    /// use std::cmp::Ordering;
+    ///
+    /// use letterxpress::Date;
+    ///
+    /// let earlier = Date::new(2023, 12, 31)?;
+    /// let later = Date::new(2024, 1, 1)?;
+    /// assert_eq!(earlier.partial_cmp(&later), Some(Ordering::Less));
+    /// # Ok::<(), letterxpress::Error>(())
+    /// ```
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
@@ -266,6 +312,10 @@ mod tests {
         );
     }
 
+    fn date(year: u16, month: u8, day: u8) -> Date {
+        Date::new(year, month, day).expect("valid test date")
+    }
+
     #[test]
     fn date_operations_are_backed_by_jiff_civil_date() {
         let date = Date::new(2024, 2, 29).expect("leap day");
@@ -278,7 +328,7 @@ mod tests {
             date.days_since_epoch(),
             civil.duration_since(UNIX_EPOCH).as_secs() / SECONDS_PER_DAY
         );
-        assert_eq!(date.cmp(&later), date.0.cmp(&later.0));
+        assert_eq!(date.cmp(&later), Ordering::Less);
     }
 
     #[test]
@@ -316,6 +366,95 @@ mod tests {
             assert_new_validation_error(year, month, 0);
         }
         assert_new_validation_error(2026, 1, u8::MAX);
+    }
+
+    #[test]
+    fn ordering_matches_the_civil_tuple_at_calendar_boundaries() {
+        let dates = [
+            date(1970, 1, 1),
+            date(1970, 1, 31),
+            date(1970, 2, 1),
+            date(1970, 2, 28),
+            date(1970, 3, 1),
+            date(1970, 3, 31),
+            date(1970, 4, 1),
+            date(1970, 4, 30),
+            date(1970, 5, 1),
+            date(1970, 5, 31),
+            date(1970, 6, 1),
+            date(1970, 6, 30),
+            date(1970, 7, 1),
+            date(1970, 7, 31),
+            date(1970, 8, 1),
+            date(1970, 8, 31),
+            date(1970, 9, 1),
+            date(1970, 9, 30),
+            date(1970, 10, 1),
+            date(1970, 10, 31),
+            date(1970, 11, 1),
+            date(1970, 11, 30),
+            date(1970, 12, 1),
+            date(1970, 12, 31),
+            date(1971, 1, 1),
+            date(1999, 12, 31),
+            date(2000, 1, 1),
+            date(2000, 2, 28),
+            date(2000, 2, 29),
+            date(2000, 3, 1),
+            date(2000, 12, 31),
+            date(2001, 1, 1),
+            date(2099, 12, 31),
+            date(2100, 1, 1),
+            date(2100, 2, 28),
+            date(2100, 3, 1),
+            date(2100, 12, 31),
+            date(2101, 1, 1),
+            date(2399, 12, 31),
+            date(2400, 1, 1),
+            date(2400, 2, 28),
+            date(2400, 2, 29),
+            date(2400, 3, 1),
+            date(2400, 12, 31),
+            date(2401, 1, 1),
+            date(9998, 12, 31),
+            date(9999, 1, 1),
+            date(9999, 12, 30),
+            date(9999, 12, 31),
+        ];
+
+        for pair in dates.windows(2) {
+            let earlier = pair[0];
+            let later = pair[1];
+            let expected = (earlier.year(), earlier.month(), earlier.day()).cmp(&(
+                later.year(),
+                later.month(),
+                later.day(),
+            ));
+
+            assert_eq!(expected, Ordering::Less, "{earlier} must precede {later}");
+            assert_eq!(earlier.cmp(&later), expected);
+            assert_eq!(later.cmp(&earlier), Ordering::Greater);
+            assert_eq!(earlier.cmp(&earlier), Ordering::Equal);
+            assert!(later.is_after(&earlier));
+            assert!(!earlier.is_after(&later));
+            assert!(!earlier.is_after(&earlier));
+        }
+    }
+
+    #[test]
+    fn century_leap_rules_hold_across_the_supported_range() {
+        for year in (2000u16..=9900).step_by(100) {
+            assert!(Date::new(year, 2, 28).is_ok(), "{year}-02-28 must be valid");
+            if year.is_multiple_of(400) {
+                assert!(Date::new(year, 2, 29).is_ok(), "{year} is a leap year");
+                assert_new_validation_error(year, 2, 30);
+            } else {
+                assert_new_validation_error(year, 2, 29);
+            }
+        }
+
+        assert!(Date::new(9999, 2, 28).is_ok());
+        assert_new_validation_error(9999, 2, 29);
     }
 
     #[test]
