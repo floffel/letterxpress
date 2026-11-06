@@ -13,11 +13,11 @@ use letterxpress::transport::{
 use letterxpress::{
     AmbiguousKind, Backgrounds, Balance, BankForm, Color, Date, Deletion, EmailDelivery, EmailJob,
     EmailJobPage, EmailJobQuery, EmailJobSubmission, EmailJobUpdate, EmailOption, Error,
-    InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, JobStatus, Journal, JournalFilter,
-    JournalType, Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest, PrintItem,
-    PrintJob, PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered, Separator,
-    Shipping, Specification, Terms, TransactionFilter, TransactionPage, TransactionQuery,
-    TransportKind,
+    InvoiceDocument, InvoiceId, InvoicePage, InvoiceQuery, JobFilter, JobId, JobStatus, Journal,
+    JournalFilter, JournalType, Letter, Mode, Money, Pagination, Price, PriceEcho, PriceRequest,
+    PrintItem, PrintJob, PrintJobPage, PrintJobQuery, PrintJobUpdate, PrintMode, Registered,
+    Separator, Shipping, Specification, Terms, TransactionFilter, TransactionPage,
+    TransactionQuery, TransportKind,
 };
 use serde_json::json;
 use strum::IntoEnumIterator;
@@ -1176,6 +1176,16 @@ fn query_objects_serialise_only_what_was_set() {
             .to_query_string()
             .unwrap(),
         "filter=done&page=2"
+    );
+
+    assert_eq!(InvoiceQuery::new().to_query_string(), None);
+    assert_eq!(
+        InvoiceQuery::new()
+            .with_page(2)
+            .unwrap()
+            .to_query_string()
+            .unwrap(),
+        "page=2"
     );
 
     assert_eq!(TransactionQuery::new().to_query_string(), None);

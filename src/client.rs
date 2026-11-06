@@ -315,6 +315,31 @@ impl<T> fmt::Debug for Client<T> {
 // Query objects
 // ---------------------------------------------------------------------------
 
+/// Validates a 1-based page number shared by every paginated query.
+fn validate_page(page: u32) -> Result<()> {
+    if page == 0 {
+        return Err(Error::invalid("page", "must be at least 1"));
+    }
+    Ok(())
+}
+
+/// Builds a query string from the shared `filter` and `page` parameters.
+fn query_string(filter: Option<&str>, page: Option<u32>) -> Option<String> {
+    let mut query = String::new();
+    if let Some(filter) = filter {
+        query.push_str("filter=");
+        query.push_str(filter);
+    }
+    if let Some(page) = page {
+        if !query.is_empty() {
+            query.push('&');
+        }
+        query.push_str("page=");
+        query.push_str(&page.to_string());
+    }
+    (!query.is_empty()).then_some(query)
+}
+
 /// `GET /v3/printjobs` query: an optional documented filter plus a page.
 ///
 /// ```
@@ -368,9 +393,7 @@ impl PrintJobQuery {
     /// assert!(PrintJobQuery::new().with_page(1).is_ok());
     /// ```
     pub fn with_page(mut self, page: u32) -> Result<Self> {
-        if page == 0 {
-            return Err(Error::invalid("page", "must be at least 1"));
-        }
+        validate_page(page)?;
         self.page = Some(page);
         Ok(self)
     }
@@ -383,18 +406,7 @@ impl PrintJobQuery {
     /// ```
     #[must_use]
     pub fn to_query_string(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(filter) = &self.filter {
-            parts.push(format!("filter={}", filter.as_str()));
-        }
-        if let Some(page) = self.page {
-            parts.push(format!("page={page}"));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("&"))
-        }
+        query_string(self.filter.map(JobFilter::as_str), self.page)
     }
 }
 
@@ -447,9 +459,7 @@ impl EmailJobQuery {
     /// assert!(EmailJobQuery::new().with_page(0).is_err());
     /// ```
     pub fn with_page(mut self, page: u32) -> Result<Self> {
-        if page == 0 {
-            return Err(Error::invalid("page", "must be at least 1"));
-        }
+        validate_page(page)?;
         self.page = Some(page);
         Ok(self)
     }
@@ -463,18 +473,7 @@ impl EmailJobQuery {
     /// ```
     #[must_use]
     pub fn to_query_string(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(filter) = &self.filter {
-            parts.push(format!("filter={}", filter.as_str()));
-        }
-        if let Some(page) = self.page {
-            parts.push(format!("page={page}"));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("&"))
-        }
+        query_string(self.filter.map(JobFilter::as_str), self.page)
     }
 }
 
@@ -528,9 +527,7 @@ impl TransactionQuery {
     /// assert!(TransactionQuery::new().with_page(0).is_err());
     /// ```
     pub fn with_page(mut self, page: u32) -> Result<Self> {
-        if page == 0 {
-            return Err(Error::invalid("page", "must be at least 1"));
-        }
+        validate_page(page)?;
         self.page = Some(page);
         Ok(self)
     }
@@ -544,18 +541,63 @@ impl TransactionQuery {
     /// ```
     #[must_use]
     pub fn to_query_string(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(filter) = &self.filter {
-            parts.push(format!("filter={}", filter.as_str()));
-        }
-        if let Some(page) = self.page {
-            parts.push(format!("page={page}"));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("&"))
-        }
+        query_string(self.filter.map(TransactionFilter::as_str), self.page)
+    }
+}
+
+/// `GET /v3/invoices` query.
+///
+/// ```
+/// use letterxpress::InvoiceQuery;
+///
+/// let query = InvoiceQuery::new().with_page(2)?;
+/// assert_eq!(query.to_query_string().unwrap(), "page=2");
+/// # Ok::<(), letterxpress::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InvoiceQuery {
+    /// 1-based page number.
+    pub page: Option<u32>,
+}
+
+impl InvoiceQuery {
+    /// First page.
+    ///
+    /// ```
+    /// assert!(letterxpress::InvoiceQuery::new().page.is_none());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects a page.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for page 0.
+    ///
+    /// ```
+    /// # use letterxpress::InvoiceQuery;
+    /// assert!(InvoiceQuery::new().with_page(0).is_err());
+    /// assert!(InvoiceQuery::new().with_page(1).is_ok());
+    /// ```
+    pub fn with_page(mut self, page: u32) -> Result<Self> {
+        validate_page(page)?;
+        self.page = Some(page);
+        Ok(self)
+    }
+
+    /// The query string, without `?`.
+    ///
+    /// ```
+    /// # use letterxpress::InvoiceQuery;
+    /// assert_eq!(InvoiceQuery::new().with_page(3)?.to_query_string().unwrap(), "page=3");
+    /// # Ok::<(), letterxpress::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_query_string(&self) -> Option<String> {
+        query_string(None, self.page)
     }
 }
 
@@ -1337,11 +1379,9 @@ impl<T: Transport> Client<T> {
     /// the provider's answer mapped as described on [`Error`] — including
     /// [`Error::Ambiguous`] when a submit may have been processed.
     pub async fn invoices(&self, page: u32) -> Result<InvoicePage> {
-        if page == 0 {
-            return Err(Error::invalid("page", "must be at least 1"));
-        }
+        let query = InvoiceQuery::new().with_page(page)?;
         let envelope = self
-            .call(Method::Get, "/invoices", Some(format!("page={page}")), None)
+            .call(Method::Get, "/invoices", query.to_query_string(), None)
             .await?;
         decode_data("GET /v3/invoices", envelope)
     }
@@ -1581,6 +1621,20 @@ mod tests {
                 prop_assert!(text.contains(authority));
             }
         }
+
+        #[test]
+        fn query_string_encoding_is_shared_by_filter_and_page(
+            filter in proptest::option::of("[a-z][a-z0-9]{0,15}"),
+            page in proptest::option::of(1u32..=u32::MAX),
+        ) {
+            let expected = match (&filter, page) {
+                (None, None) => None,
+                (Some(filter), None) => Some(format!("filter={filter}")),
+                (None, Some(page)) => Some(format!("page={page}")),
+                (Some(filter), Some(page)) => Some(format!("filter={filter}&page={page}")),
+            };
+            prop_assert_eq!(query_string(filter.as_deref(), page), expected);
+        }
     }
 
     #[test]
@@ -1691,9 +1745,61 @@ mod tests {
 
     #[test]
     fn every_query_object_rejects_page_zero_and_accepts_page_one() {
-        assert!(EmailJobQuery::new().with_page(1).is_ok());
-        assert!(TransactionQuery::new().with_page(1).is_ok());
-        assert!(PrintJobQuery::new().with_page(1).is_ok());
+        for result in [
+            PrintJobQuery::new().with_page(1).map(|_| ()),
+            EmailJobQuery::new().with_page(1).map(|_| ()),
+            TransactionQuery::new().with_page(1).map(|_| ()),
+            InvoiceQuery::new().with_page(1).map(|_| ()),
+        ] {
+            assert!(result.is_ok());
+        }
+        for result in [
+            PrintJobQuery::new().with_page(0).map(|_| ()),
+            EmailJobQuery::new().with_page(0).map(|_| ()),
+            TransactionQuery::new().with_page(0).map(|_| ()),
+            InvoiceQuery::new().with_page(0).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(Error::Validation { field: "page", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn query_page_boundaries_share_one_validation_and_encoding_rule() {
+        assert_eq!(
+            PrintJobQuery::new()
+                .with_page(u32::MAX)
+                .expect("largest page")
+                .to_query_string()
+                .as_deref(),
+            Some("page=4294967295")
+        );
+        assert_eq!(
+            EmailJobQuery::new()
+                .with_page(u32::MAX)
+                .expect("largest page")
+                .to_query_string()
+                .as_deref(),
+            Some("page=4294967295")
+        );
+        assert_eq!(
+            TransactionQuery::new()
+                .with_page(u32::MAX)
+                .expect("largest page")
+                .to_query_string()
+                .as_deref(),
+            Some("page=4294967295")
+        );
+        assert_eq!(
+            InvoiceQuery::new()
+                .with_page(u32::MAX)
+                .expect("largest page")
+                .to_query_string()
+                .as_deref(),
+            Some("page=4294967295")
+        );
     }
 
     #[test]
