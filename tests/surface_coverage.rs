@@ -58,6 +58,98 @@ fn colour_covers_both_documented_values_and_unknown_ones() {
 }
 
 #[test]
+fn request_vocabularies_serialize_only_documented_values() {
+    assert_eq!(
+        serde_json::to_string(&Color::BlackAndWhite).unwrap(),
+        "\"1\""
+    );
+    assert_eq!(serde_json::to_string(&Color::Color).unwrap(), "\"4\"");
+    assert_eq!(
+        serde_json::to_string(&PrintMode::Simplex).unwrap(),
+        "\"simplex\""
+    );
+    assert_eq!(
+        serde_json::to_string(&PrintMode::Duplex).unwrap(),
+        "\"duplex\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Shipping::National).unwrap(),
+        "\"national\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Shipping::International).unwrap(),
+        "\"international\""
+    );
+    assert_eq!(serde_json::to_string(&Shipping::Auto).unwrap(), "\"auto\"");
+    assert_eq!(
+        serde_json::to_string(&Registered::EinschreibenEinwurf).unwrap(),
+        "\"r1\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Registered::Einschreiben).unwrap(),
+        "\"r2\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EmailOption::MailDirect).unwrap(),
+        "\"maildirect\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EmailOption::MailPlus).unwrap(),
+        "\"mailplus\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EmailOption::MailSecure).unwrap(),
+        "\"mailsecure\""
+    );
+
+    assert!(serde_json::to_string(&Color::Other("9".into())).is_err());
+    assert!(serde_json::to_string(&PrintMode::Other("booklet".into())).is_err());
+    assert!(serde_json::to_string(&Shipping::Other("mars".into())).is_err());
+    assert!(serde_json::to_string(&Registered::Other("r9".into())).is_err());
+    assert!(serde_json::to_string(&EmailOption::Other("fax".into())).is_err());
+
+    assert_eq!(Color::BlackAndWhite.to_request("color").unwrap(), "1");
+    assert_eq!(PrintMode::Duplex.to_request("mode").unwrap(), "duplex");
+    assert_eq!(Shipping::Auto.to_request("shipping").unwrap(), "auto");
+    assert_eq!(
+        Registered::Einschreiben.to_request("registered").unwrap(),
+        "r2"
+    );
+    assert_eq!(
+        EmailOption::MailSecure.to_request("email_option").unwrap(),
+        "mailsecure"
+    );
+    assert!(matches!(
+        Color::from_wire("9").to_request("color"),
+        Err(Error::Validation { field: "color", .. })
+    ));
+}
+
+#[test]
+fn request_vocabularies_still_decode_unknown_values() {
+    assert_eq!(
+        serde_json::from_value::<Color>(json!("9")).unwrap(),
+        Color::Other("9".into())
+    );
+    assert_eq!(
+        serde_json::from_value::<PrintMode>(json!("booklet")).unwrap(),
+        PrintMode::Other("booklet".into())
+    );
+    assert_eq!(
+        serde_json::from_value::<Shipping>(json!("mars")).unwrap(),
+        Shipping::Other("mars".into())
+    );
+    assert_eq!(
+        serde_json::from_value::<Registered>(json!("r9")).unwrap(),
+        Registered::Other("r9".into())
+    );
+    assert_eq!(
+        serde_json::from_value::<EmailOption>(json!("fax")).unwrap(),
+        EmailOption::Other("fax".into())
+    );
+}
+
+#[test]
 fn print_mode_and_shipping_cover_their_values() {
     assert_eq!(PrintMode::Simplex.to_string(), "simplex");
     assert_eq!(PrintMode::Duplex.to_string(), "duplex");
@@ -331,8 +423,11 @@ fn every_letter_builder_lands_on_the_wire() {
 
     let specification = Specification::new()
         .with_color(Color::Color)
+        .expect("color")
         .with_print_mode(PrintMode::Duplex)
+        .expect("print mode")
         .with_shipping(Shipping::National)
+        .expect("shipping")
         .with_c4_envelope(true);
     assert_eq!(specification.color(), Color::Color);
     assert_eq!(specification.print_mode(), PrintMode::Duplex);
@@ -421,13 +516,16 @@ fn price_request_builders_produce_the_documented_body() {
     let request = PriceRequest::new(2)
         .unwrap()
         .with_color(Color::Color)
+        .expect("color")
         .with_print_mode(PrintMode::Duplex)
+        .expect("print mode")
         .with_shipping(Shipping::National)
         .unwrap()
         .with_c4_envelope(true)
         .with_registered(Registered::Einschreiben)
         .unwrap()
-        .with_email_option(EmailOption::MailSecure);
+        .with_email_option(EmailOption::MailSecure)
+        .expect("email option");
 
     assert_eq!(request.pages(), 2);
     assert_eq!(request.shipping(), Shipping::National);
@@ -1245,11 +1343,13 @@ fn update_bodies_only_carry_the_mutable_fields() {
     assert!(PrintJobUpdate::new(Specification::new())
         .with_notice("x\u{0}")
         .is_err());
-    assert!(
-        PrintJobUpdate::new(Specification::new().with_shipping(Shipping::International))
-            .with_registered(Registered::Einschreiben)
-            .is_err()
-    );
+    assert!(PrintJobUpdate::new(
+        Specification::new()
+            .with_shipping(Shipping::International)
+            .expect("international shipping"),
+    )
+    .with_registered(Registered::Einschreiben)
+    .is_err());
 
     assert_eq!(
         EmailJobUpdate::new("a@b.de").unwrap().to_json()["email_receiver"],

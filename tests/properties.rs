@@ -568,8 +568,11 @@ proptest! {
         };
         let spec = letterxpress::Specification::new()
             .with_color(color)
+            .unwrap()
             .with_print_mode(mode)
+            .unwrap()
             .with_shipping(shipping)
+            .unwrap()
             .with_c4_envelope(c4);
         let json = spec.to_json();
 
@@ -577,6 +580,32 @@ proptest! {
         prop_assert!(matches!(json["mode"].as_str(), Some("simplex" | "duplex")));
         prop_assert!(matches!(json["shipping"].as_str(), Some("national" | "international" | "auto")));
         prop_assert_eq!(json["c4"].as_u64(), Some(u64::from(u8::from(c4))));
+    }
+
+    /// Unknown response values remain decodable, but no request-side enum can
+    /// serialize them back onto the wire.
+    #[test]
+    fn unknown_request_vocabularies_are_decodable_but_not_serializable(raw in ".*") {
+        let color = Color::from_wire(&raw);
+        let decoded: Color = serde_json::from_value(serde_json::Value::String(raw.clone())).unwrap();
+        prop_assert_eq!(&decoded, &color);
+
+        if matches!(color, Color::Other(_)) {
+            prop_assert!(serde_json::to_string(&color).is_err());
+            prop_assert!(color.to_request("color").is_err());
+        } else {
+            prop_assert!(serde_json::to_string(&color).is_ok());
+            prop_assert!(color.to_request("color").is_ok());
+        }
+
+        let print_mode = PrintMode::from_wire(&raw);
+        let shipping = Shipping::from_wire(&raw);
+        let registered = Registered::from_wire(&raw);
+        let email = EmailOption::from_wire(&raw);
+        prop_assert_eq!(print_mode.to_request("mode").is_ok(), !matches!(print_mode, PrintMode::Other(_)));
+        prop_assert_eq!(shipping.to_request("shipping").is_ok(), !matches!(shipping, Shipping::Other(_)));
+        prop_assert_eq!(registered.to_request("registered").is_ok(), !matches!(registered, Registered::Other(_)));
+        prop_assert_eq!(email.to_request("email_option").is_ok(), !matches!(email, EmailOption::Other(_)));
     }
 
     /// The registered/shipping rule is enforced from both sides: for every

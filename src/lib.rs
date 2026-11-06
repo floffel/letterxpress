@@ -66,8 +66,10 @@
 //!   not a billed letter.
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`JobStatus::Other`]), scalars are accepted as strings or numbers,
-//!   and both `snake_case` and `camelCase` keys decode. Strictness lives in the
-//!   security checks, never in deserialization.
+//!   and both `snake_case` and `camelCase` keys decode. Request-side vocabularies
+//!   keep the carried value for inspection but reject it in serialization and
+//!   request builders, so a value this crate does not model never reaches the
+//!   wire.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the tests
 //!   drive [`MockTransport`](crate::transport::MockTransport) and
 //!   [`RecordingTransport`](crate::transport::RecordingTransport).

@@ -19,6 +19,9 @@ bank-transfer forms — and that is what this crate types.
   or strings, `snake_case` or `camelCase`; the one exception is a flag — `c4`,
   `bank_form` — whose unreadable spelling fails closed instead of defaulting to
   `false`)
+- strict request vocabularies: `Color`, `PrintMode`, `Shipping`, `Registered`
+  and `EmailOption` retain unknown response values in `Other`, but reject them
+  in request builders and serde serialization with a typed validation error
 - typed errors with an explicit retryable/ambiguous split
 - no socket needed to test: `mock` and `RecordingTransport` ship with the crate
 

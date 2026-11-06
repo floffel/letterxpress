@@ -1428,14 +1428,16 @@ fn registered_mail_is_rejected_internationally_instead_of_being_dropped() {
     ));
 
     // Replacing the whole specification is the third way into the same pair.
-    let international = letterxpress::Specification::new().with_shipping(Shipping::International);
+    let international = letterxpress::Specification::new()
+        .with_shipping(Shipping::International)
+        .expect("international");
     assert!(registered
         .clone()
         .with_specification(international)
         .is_err());
 
-    // A carry-all spelling of the same wire value cannot slip past the rule,
-    // padded or not.
+    // A carry-all spelling of the same wire value cannot slip past the rule;
+    // the request conversion rejects it before the cross-field check.
     let smuggled = Shipping::from_wire("International");
     assert!(matches!(smuggled, Shipping::International));
     assert!(registered

@@ -17,8 +17,8 @@
 //! use letterxpress::{Color, Letter, PrintMode, Shipping};
 //!
 //! let letter = Letter::new(b"%PDF-1.4\n%fake-but-shaped-like-a-pdf\n")?
-//!     .with_color(Color::BlackAndWhite)
-//!     .with_print_mode(PrintMode::Duplex)
+//!     .with_color(Color::BlackAndWhite)?
+//!     .with_print_mode(PrintMode::Duplex)?
 //!     .with_shipping(Shipping::National)?
 //!     .with_notice("invoice-4711")?;
 //!
@@ -83,12 +83,13 @@ impl EncodedPdf {
 /// use letterxpress::{Color, PrintMode, Shipping, Specification};
 ///
 /// let spec = Specification::new()
-///     .with_color(Color::Color)
-///     .with_print_mode(PrintMode::Duplex)
-///     .with_shipping(Shipping::International);
+///     .with_color(Color::Color)?
+///     .with_print_mode(PrintMode::Duplex)?
+///     .with_shipping(Shipping::International)?;
 ///
 /// assert_eq!(spec.color(), Color::Color);
 /// assert!(!spec.c4_envelope());
+/// # Ok::<(), letterxpress::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Specification {
@@ -125,12 +126,18 @@ impl Specification {
     /// ```
     /// use letterxpress::{Color, Specification};
     ///
-    /// assert_eq!(Specification::new().with_color(Color::Color).color(), Color::Color);
+    /// assert_eq!(Specification::new().with_color(Color::Color)?.color(), Color::Color);
+    /// assert!(Specification::new().with_color(Color::from_wire("9")).is_err());
+    /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_color(mut self, color: Color) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`Color::Other`] value.
+    pub fn with_color(mut self, color: Color) -> Result<Self, Error> {
+        color.to_request("color")?;
         self.color = color;
-        self
+        Ok(self)
     }
 
     /// Sets simplex/duplex.
@@ -138,12 +145,17 @@ impl Specification {
     /// ```
     /// use letterxpress::{PrintMode, Specification};
     ///
-    /// assert_eq!(Specification::new().with_print_mode(PrintMode::Duplex).print_mode(), PrintMode::Duplex);
+    /// assert_eq!(Specification::new().with_print_mode(PrintMode::Duplex)?.print_mode(), PrintMode::Duplex);
+    /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`PrintMode::Other`] value.
+    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Result<Self, Error> {
+        print_mode.to_request("mode")?;
         self.print_mode = print_mode;
-        self
+        Ok(self)
     }
 
     /// Sets the shipping class.
@@ -155,12 +167,18 @@ impl Specification {
     /// ```
     /// use letterxpress::{Shipping, Specification};
     ///
-    /// assert_eq!(Specification::new().with_shipping(Shipping::National).shipping(), Shipping::National);
+    /// assert_eq!(Specification::new().with_shipping(Shipping::National)?.shipping(), Shipping::National);
+    /// assert!(Specification::new().with_shipping(Shipping::from_wire("mars")).is_err());
+    /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_shipping(mut self, shipping: Shipping) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`Shipping::Other`] value.
+    pub fn with_shipping(mut self, shipping: Shipping) -> Result<Self, Error> {
+        shipping.to_request("shipping")?;
         self.shipping = shipping;
-        self
+        Ok(self)
     }
 
     /// Requests a C4 envelope (documented as valid "under 9 sheets").
@@ -216,6 +234,13 @@ impl Specification {
         self.c4_envelope
     }
 
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.color.to_request("color")?;
+        self.print_mode.to_request("mode")?;
+        self.shipping.to_request("shipping")?;
+        Ok(())
+    }
+
     /// The wire shape.
     ///
     /// ```
@@ -225,12 +250,18 @@ impl Specification {
     /// assert_eq!(json["shipping"], "auto");
     /// assert_eq!(json["c4"], 0);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is broken and an unknown request value
+    /// is stored without validation. Public builders reject those values.
     #[must_use]
     pub fn to_json(&self) -> Value {
+        self.validate().expect("stored specification is known");
         json!({
-            "color": self.color.as_str(),
-            "mode": self.print_mode.as_str(),
-            "shipping": self.shipping.as_str(),
+            "color": self.color.to_request("color").expect("stored color is known"),
+            "mode": self.print_mode.to_request("mode").expect("stored mode is known"),
+            "shipping": self.shipping.to_request("shipping").expect("stored shipping is known"),
             "c4": u8::from(self.c4_envelope),
         })
     }
@@ -346,6 +377,14 @@ impl Separator {
     }
 }
 
+impl EmailDelivery {
+    fn validate(&self) -> Result<(), Error> {
+        validate_email("letter.email_letter.email_receiver", &self.receiver)?;
+        self.option.to_request("email_option")?;
+        Ok(())
+    }
+}
+
 /// SMART@MAIL delivery for a single job (`email_letter`).
 ///
 /// Cannot be combined with a serial letter — the provider documents that
@@ -380,10 +419,12 @@ impl EmailDelivery {
     ///
     /// assert!(EmailDelivery::new("a@b.de", EmailOption::MailPlus).is_ok());
     /// assert!(EmailDelivery::new("a b@c.de", EmailOption::MailPlus).is_err());
+    /// assert!(EmailDelivery::new("a@b.de", EmailOption::from_wire("fax")).is_err());
     /// ```
     pub fn new(receiver: impl Into<String>, option: EmailOption) -> Result<Self, Error> {
         let receiver = receiver.into();
         validate_email("letter.email_letter.email_receiver", &receiver)?;
+        option.to_request("email_option")?;
         Ok(Self { receiver, option })
     }
 
@@ -422,10 +463,15 @@ impl EmailDelivery {
     /// assert_eq!(json["email_receiver"], "a@b.de");
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is broken and an unknown delivery option
+    /// is stored without validation. [`EmailDelivery::new`] rejects it.
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({
-            "email_option": self.option.as_str(),
+            "email_option": self.option.to_request("email_option").expect("stored email option is known"),
             "email_receiver": self.receiver,
         })
     }
@@ -859,7 +905,7 @@ impl BankForm {
 ///
 /// let letter = Letter::new(b"%PDF-1.4\n...")?
 ///     .with_shipping(Shipping::National)?
-///     .with_color(Color::Color)
+///     .with_color(Color::Color)?
 ///     .with_filename_original("Rechnung-123456.pdf")?
 ///     .with_attachment(b"%PDF-1.4\nattachment\n")?;
 ///
@@ -933,17 +979,18 @@ impl Letter {
     /// ```
     /// use letterxpress::{Color, Letter, Registered, Shipping, Specification};
     ///
-    /// let spec = Specification::new().with_color(Color::Color);
+    /// let spec = Specification::new().with_color(Color::Color)?;
     /// let letter = Letter::new(b"%PDF-1.4\n")?.with_specification(spec)?;
     /// assert_eq!(letter.specification().color(), Color::Color);
     ///
     /// // Replacing the specification cannot lift the registered-mail rule.
     /// let registered = Letter::new(b"%PDF-1.4\n")?.with_registered(Registered::Einschreiben)?;
-    /// let international = Specification::new().with_shipping(Shipping::International);
+    /// let international = Specification::new().with_shipping(Shipping::International)?;
     /// assert!(registered.with_specification(international).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_specification(mut self, specification: Specification) -> Result<Self, Error> {
+        specification.validate()?;
         check_registered_shipping(
             "letter.specification.shipping",
             self.registered.as_ref(),
@@ -958,13 +1005,17 @@ impl Letter {
     /// ```
     /// use letterxpress::{Color, Letter};
     ///
-    /// assert_eq!(Letter::new(b"%PDF-1.4\n")?.with_color(Color::Color).specification().color(), Color::Color);
+    /// assert_eq!(Letter::new(b"%PDF-1.4\n")?.with_color(Color::Color)?.specification().color(), Color::Color);
+    /// assert!(Letter::new(b"%PDF-1.4\n")?.with_color(Color::from_wire("9")).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_color(mut self, color: Color) -> Self {
-        self.specification = self.specification.with_color(color);
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`Color::Other`] value.
+    pub fn with_color(mut self, color: Color) -> Result<Self, Error> {
+        self.specification = self.specification.with_color(color)?;
+        Ok(self)
     }
 
     /// Sets simplex/duplex.
@@ -972,14 +1023,17 @@ impl Letter {
     /// ```
     /// use letterxpress::{Letter, PrintMode};
     ///
-    /// let letter = Letter::new(b"%PDF-1.4\n")?.with_print_mode(PrintMode::Duplex);
+    /// let letter = Letter::new(b"%PDF-1.4\n")?.with_print_mode(PrintMode::Duplex)?;
     /// assert_eq!(letter.to_json()["specification"]["mode"], "duplex");
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Self {
-        self.specification = self.specification.with_print_mode(print_mode);
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`PrintMode::Other`] value.
+    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Result<Self, Error> {
+        self.specification = self.specification.with_print_mode(print_mode)?;
+        Ok(self)
     }
 
     /// Sets the shipping class.
@@ -1007,12 +1061,13 @@ impl Letter {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_shipping(mut self, shipping: Shipping) -> Result<Self, Error> {
+        shipping.to_request("shipping")?;
         check_registered_shipping(
             "letter.specification.shipping",
             self.registered.as_ref(),
             &shipping,
         )?;
-        self.specification = self.specification.with_shipping(shipping);
+        self.specification = self.specification.with_shipping(shipping)?;
         Ok(self)
     }
 
@@ -1086,6 +1141,7 @@ impl Letter {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self, Error> {
+        registered.to_request("registered")?;
         check_registered_shipping(
             "letter.registered",
             Some(&registered),
@@ -1316,6 +1372,7 @@ impl Letter {
                 "cannot be combined with serial_letter (documented as mutually exclusive)",
             ));
         }
+        email.validate()?;
         self.email = Some(email);
         Ok(self)
     }
@@ -1330,6 +1387,13 @@ impl Letter {
     /// constructor ever manages to assemble the pair without going through a
     /// setter.
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.specification.validate()?;
+        if let Some(registered) = &self.registered {
+            registered.to_request("registered")?;
+        }
+        if let Some(email) = &self.email {
+            email.validate()?;
+        }
         check_registered_shipping(
             "letter.registered",
             self.registered.as_ref(),
@@ -1351,6 +1415,12 @@ impl Letter {
     /// assert_eq!(json["specification"]["color"], "1");
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is broken and an unknown request value
+    /// is stored without validation. Public builders and the client boundary
+    /// reject those values.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut map = Map::new();
@@ -1372,7 +1442,12 @@ impl Letter {
         if let Some(registered) = &self.registered {
             map.insert(
                 "registered".to_string(),
-                Value::String(registered.as_str().to_string()),
+                Value::String(
+                    registered
+                        .to_request("registered")
+                        .expect("stored registration is known")
+                        .to_string(),
+                ),
             );
         }
         if let Some(date) = &self.dispatch_date {
@@ -1504,8 +1579,8 @@ impl Letter {
 /// use letterxpress::{Color, PriceRequest, PrintMode, Shipping};
 ///
 /// let request = PriceRequest::new(3)?
-///     .with_color(Color::Color)
-///     .with_print_mode(PrintMode::Duplex)
+///     .with_color(Color::Color)?
+///     .with_print_mode(PrintMode::Duplex)?
 ///     .with_shipping(Shipping::National)?;
 ///
 /// assert_eq!(request.to_json()["specification"]["pages"], 3);
@@ -1559,13 +1634,17 @@ impl PriceRequest {
     /// ```
     /// use letterxpress::{Color, PriceRequest};
     ///
-    /// assert_eq!(PriceRequest::new(1)?.with_color(Color::Color).to_json()["specification"]["color"], "4");
+    /// assert_eq!(PriceRequest::new(1)?.with_color(Color::Color)?.to_json()["specification"]["color"], "4");
+    /// assert!(PriceRequest::new(1)?.with_color(Color::from_wire("9")).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_color(mut self, color: Color) -> Self {
-        self.specification = self.specification.with_color(color);
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`Color::Other`] value.
+    pub fn with_color(mut self, color: Color) -> Result<Self, Error> {
+        self.specification = self.specification.with_color(color)?;
+        Ok(self)
     }
 
     /// Sets simplex/duplex.
@@ -1573,14 +1652,17 @@ impl PriceRequest {
     /// ```
     /// use letterxpress::{PriceRequest, PrintMode};
     ///
-    /// let request = PriceRequest::new(1)?.with_print_mode(PrintMode::Duplex);
+    /// let request = PriceRequest::new(1)?.with_print_mode(PrintMode::Duplex)?;
     /// assert_eq!(request.to_json()["specification"]["mode"], "duplex");
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Self {
-        self.specification = self.specification.with_print_mode(print_mode);
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`PrintMode::Other`] value.
+    pub fn with_print_mode(mut self, print_mode: PrintMode) -> Result<Self, Error> {
+        self.specification = self.specification.with_print_mode(print_mode)?;
+        Ok(self)
     }
 
     /// Sets the shipping class.
@@ -1604,12 +1686,13 @@ impl PriceRequest {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_shipping(mut self, shipping: Shipping) -> Result<Self, Error> {
+        shipping.to_request("shipping")?;
         check_registered_shipping(
             "price.specification.shipping",
             self.registered.as_ref(),
             &shipping,
         )?;
-        self.specification = self.specification.with_shipping(shipping);
+        self.specification = self.specification.with_shipping(shipping)?;
         Ok(self)
     }
 
@@ -1646,6 +1729,7 @@ impl PriceRequest {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn with_registered(mut self, registered: Registered) -> Result<Self, Error> {
+        registered.to_request("registered")?;
         check_registered_shipping(
             "price.registered",
             Some(&registered),
@@ -1660,14 +1744,19 @@ impl PriceRequest {
     /// ```
     /// use letterxpress::{EmailOption, PriceRequest};
     ///
-    /// let request = PriceRequest::new(1)?.with_email_option(EmailOption::MailSecure);
+    /// let request = PriceRequest::new(1)?.with_email_option(EmailOption::MailSecure)?;
     /// assert_eq!(request.to_json()["specification"]["email_option"], "mailsecure");
+    /// assert!(PriceRequest::new(1)?.with_email_option(EmailOption::from_wire("fax")).is_err());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_email_option(mut self, email_option: EmailOption) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unknown [`EmailOption::Other`] value.
+    pub fn with_email_option(mut self, email_option: EmailOption) -> Result<Self, Error> {
+        email_option.to_request("email_option")?;
         self.email_option = Some(email_option);
-        self
+        Ok(self)
     }
 
     /// The page count being priced.
@@ -1697,6 +1786,13 @@ impl PriceRequest {
     /// combination from both sides; this repeats the check at the client
     /// boundary.
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.specification.validate()?;
+        if let Some(registered) = &self.registered {
+            registered.to_request("registered")?;
+        }
+        if let Some(email_option) = &self.email_option {
+            email_option.to_request("email_option")?;
+        }
         check_registered_shipping(
             "price.registered",
             self.registered.as_ref(),
@@ -1714,15 +1810,27 @@ impl PriceRequest {
     /// assert!(json.get("registered").is_none());
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is broken and an unknown request value
+    /// is stored without validation. Public builders and the client boundary
+    /// reject those values.
     #[must_use]
     pub fn to_json(&self) -> Value {
+        self.validate().expect("stored price request is known");
         let mut specification = self.specification.to_json();
         if let Some(map) = specification.as_object_mut() {
             map.insert("pages".to_string(), Value::Number(self.pages.into()));
             if let Some(email_option) = &self.email_option {
                 map.insert(
                     "email_option".to_string(),
-                    Value::String(email_option.as_str().to_string()),
+                    Value::String(
+                        email_option
+                            .to_request("email_option")
+                            .expect("stored email option is known")
+                            .to_string(),
+                    ),
                 );
             }
         }
@@ -1731,7 +1839,12 @@ impl PriceRequest {
         if let Some(registered) = &self.registered {
             map.insert(
                 "registered".to_string(),
-                Value::String(registered.as_str().to_string()),
+                Value::String(
+                    registered
+                        .to_request("registered")
+                        .expect("stored registration is known")
+                        .to_string(),
+                ),
             );
         }
         Value::Object(map)
@@ -1793,10 +1906,11 @@ fn check_chars(field: &'static str, value: &str, max: usize) -> Result<(), Error
 /// tried to set, so the error points at what it passed in.
 ///
 /// The comparison uses the wire spelling rather than `==` on the enum: a
-/// carry-all `Shipping::Other("international")` goes on the wire as
-/// `"international"` and is just as impossible as the named variant. The value
-/// is trimmed first, because a hand-built `Other` is not normalized by
-/// [`Shipping::from_wire`] and would otherwise reach the provider padded.
+/// stripped `Other("international")` would spell the same value as the named
+/// variant. The value is trimmed first, because a hand-built `Other` is not
+/// normalized by [`Shipping::from_wire`]. Request builders reject every
+/// `Other` before this check; the wire comparison remains a defensive final
+/// pass for stored values.
 pub(crate) fn check_registered_shipping(
     field: &'static str,
     registered: Option<&Registered>,
@@ -2197,33 +2311,31 @@ mod tests {
         // Inside: national, and `Auto` (the provider still decides domestically).
         letter.registered = Some(Registered::Einschreiben);
         assert!(letter.validate().is_ok());
-        letter.specification = Specification::new().with_shipping(Shipping::National);
+        letter.specification = Specification::new()
+            .with_shipping(Shipping::National)
+            .expect("national");
         assert!(letter.validate().is_ok());
-        letter.specification = Specification::new().with_shipping(Shipping::Auto);
+        letter.specification = Specification::new()
+            .with_shipping(Shipping::Auto)
+            .expect("auto");
         assert!(letter.validate().is_ok());
 
-        // Outside: international, by name and by the carry-all spelling of the
-        // same wire value.
-        for shipping in [
-            Shipping::International,
-            Shipping::Other("international".into()),
-            Shipping::Other("International".into()),
-            // A hand-built carry-all is not normalized, so the padding must not
-            // buy it a pass either.
-            Shipping::Other("  international  ".into()),
-        ] {
-            letter.specification = Specification::new().with_shipping(shipping.clone());
-            assert!(
-                matches!(
-                    letter.validate(),
-                    Err(Error::Validation {
-                        field: "letter.registered",
-                        ..
-                    })
-                ),
-                "{shipping:?} must be caught by the final pass"
-            );
-        }
+        // Outside: international. The carry-all branch is unreachable through
+        // the public builders now, but the final pass still checks stored values.
+        let shipping = Shipping::International;
+        letter.specification = Specification::new()
+            .with_shipping(shipping.clone())
+            .expect("known shipping");
+        assert!(
+            matches!(
+                letter.validate(),
+                Err(Error::Validation {
+                    field: "letter.registered",
+                    ..
+                })
+            ),
+            "{shipping:?} must be caught by the final pass"
+        );
 
         // Without a registration the shipping class alone is never a violation.
         letter.registered = None;
@@ -2233,7 +2345,9 @@ mod tests {
         let mut request = PriceRequest::new(1).expect("price");
         request.registered = Some(Registered::Einschreiben);
         assert!(request.validate().is_ok());
-        request.specification = Specification::new().with_shipping(Shipping::International);
+        request.specification = Specification::new()
+            .with_shipping(Shipping::International)
+            .expect("international");
         assert!(matches!(
             request.validate(),
             Err(Error::Validation {
@@ -2241,7 +2355,61 @@ mod tests {
                 ..
             })
         ));
-        request.specification = Specification::new().with_shipping(Shipping::National);
+        request.specification = Specification::new()
+            .with_shipping(Shipping::National)
+            .expect("national");
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn request_builders_reject_unknown_wire_values() {
+        assert!(Specification::new()
+            .with_color(Color::Other("9".into()))
+            .is_err());
+        assert!(Specification::new()
+            .with_print_mode(PrintMode::Other("booklet".into()))
+            .is_err());
+        assert!(Specification::new()
+            .with_shipping(Shipping::Other("mars".into()))
+            .is_err());
+
+        assert!(EmailDelivery::new("a@b.de", EmailOption::Other("fax".into())).is_err());
+        assert!(Letter::new(&pdf())
+            .expect("letter")
+            .with_color(Color::Other("9".into()))
+            .is_err());
+        assert!(Letter::new(&pdf())
+            .expect("letter")
+            .with_print_mode(PrintMode::Other("booklet".into()))
+            .is_err());
+        assert!(Letter::new(&pdf())
+            .expect("letter")
+            .with_shipping(Shipping::Other("mars".into()))
+            .is_err());
+        assert!(Letter::new(&pdf())
+            .expect("letter")
+            .with_registered(Registered::Other("r9".into()))
+            .is_err());
+
+        assert!(PriceRequest::new(1)
+            .expect("price")
+            .with_color(Color::Other("9".into()))
+            .is_err());
+        assert!(PriceRequest::new(1)
+            .expect("price")
+            .with_print_mode(PrintMode::Other("booklet".into()))
+            .is_err());
+        assert!(PriceRequest::new(1)
+            .expect("price")
+            .with_shipping(Shipping::Other("mars".into()))
+            .is_err());
+        assert!(PriceRequest::new(1)
+            .expect("price")
+            .with_registered(Registered::Other("r9".into()))
+            .is_err());
+        assert!(PriceRequest::new(1)
+            .expect("price")
+            .with_email_option(EmailOption::Other("fax".into()))
+            .is_err());
     }
 }
