@@ -31,6 +31,11 @@ All notable changes to this project are documented here.
   wire enums. Their public `FromStr` methods remain deliberately custom so
   trimming, ASCII case-insensitivity, and the crate's typed `Error` contract do
   not change.
+- Decode status-like wire enums from JSON strings only. Unknown strings remain
+  `Other(String)`, while a present `status` of `null`, a number, boolean,
+  object or array is a typed decode error naming the field. An absent status
+  still uses the model's default, and responses are never given a coerced or
+  fabricated status.
 - Send journal filters as percent-encoded query parameters, leaving only the
   provider-mandated `auth` object in the GET body. Reject accidental GET
   endpoint payloads except for the documented `/price` request.

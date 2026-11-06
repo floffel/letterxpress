@@ -1,12 +1,16 @@
 //! Wire vocabularies: the closed value sets the provider documents, plus a
 //! carry-all for everything else.
 //!
-//! Decoding is deliberately permissive: an unknown value is carried in
-//! `Other(String)` after trimming and ASCII-lowercasing instead of failing the
-//! whole response, so a new provider status cannot take a client offline.
+//! Decoding is deliberately forward-compatible for the documented string
+//! vocabulary: an unknown string value is carried in `Other(String)` after
+//! trimming and ASCII-lowercasing instead of failing the whole response, so a
+//! new provider status cannot take a client offline. JSON numbers, booleans,
+//! objects, arrays and null are not wire enum values; they fail decoding rather
+//! than being coerced into a value the provider never sent.
+//!
 //! Encoding is strict for request-side values. [`Color`], [`PrintMode`],
 //! [`Shipping`], [`Registered`] and [`EmailOption`] keep `Other` so responses
-//! can be decoded permissively, but serde serialization and the explicit
+//! can be decoded forward-compatibly, but serde serialization and the explicit
 //! `to_request` conversion reject it. [`JobFilter`], [`TransactionFilter`] and
 //! [`JournalType`] have no `Other` at all, because guessing a filter value
 //! would silently return the wrong result set.
@@ -149,22 +153,21 @@ macro_rules! wire_enum {
 
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let raw = deserializer.deserialize_any(WireVisitor)?;
+                let raw = deserializer.deserialize_str(WireVisitor)?;
                 Ok(Self::from_wire(&raw))
             }
         }
     };
 }
 
-/// Visitor shared by every wire enum: accepts strings, numbers, booleans and
-/// null without ever failing.
+/// Visitor shared by every wire enum: accepts only JSON strings.
 struct WireVisitor;
 
 impl Visitor<'_> for WireVisitor {
     type Value = String;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a string-valued enum member")
+        f.write_str("a JSON string-valued enum member")
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -173,30 +176,6 @@ impl Visitor<'_> for WireVisitor {
 
     fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
         Ok(value)
-    }
-
-    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(value.to_string())
-    }
-
-    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(value.to_string())
-    }
-
-    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-        Ok(value.to_string())
-    }
-
-    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(value.to_string())
-    }
-
-    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-        Ok(String::new())
-    }
-
-    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-        Ok(String::new())
     }
 }
 
@@ -317,8 +296,9 @@ wire_enum! {
     ///
     /// The provider documents no state machine, only this vocabulary (from the
     /// `filter` table and the examples). Both spellings of "canceled" are
-    /// accepted; anything unknown is carried through after trimming and
-    /// ASCII-lowercasing.
+    /// accepted; unknown strings are carried through after trimming and
+    /// ASCII-lowercasing. Any other JSON shape is a decode error: a status is
+    /// never coerced from a number, boolean, object, array or null.
     ///
     /// ```
     /// use letterxpress::JobStatus;
@@ -604,7 +584,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wire_visitor_accepts_every_json_scalar() {
+    fn the_wire_visitor_accepts_only_json_strings() {
         assert_eq!(
             WireVisitor.visit_str::<serde_json::Error>("1").unwrap(),
             "1"
@@ -615,31 +595,18 @@ mod tests {
                 .unwrap(),
             "x"
         );
-        assert_eq!(
-            WireVisitor.visit_i64::<serde_json::Error>(-1).unwrap(),
-            "-1"
-        );
-        assert_eq!(WireVisitor.visit_u64::<serde_json::Error>(4).unwrap(), "4");
-        assert_eq!(
-            WireVisitor.visit_f64::<serde_json::Error>(1.5).unwrap(),
-            "1.5"
-        );
-        assert_eq!(
-            WireVisitor.visit_bool::<serde_json::Error>(true).unwrap(),
-            "true"
-        );
-        assert_eq!(WireVisitor.visit_unit::<serde_json::Error>().unwrap(), "");
-        assert_eq!(WireVisitor.visit_none::<serde_json::Error>().unwrap(), "");
     }
 
     #[test]
-    fn numeric_and_null_values_decode_into_carry_alls() {
+    fn non_string_values_are_refused_instead_of_becoming_carry_alls() {
+        for value in ["-1", "1.5", "true", "null", "{}", "[]"] {
+            assert!(
+                serde_json::from_str::<PrintMode>(value).is_err(),
+                "{value} is not a wire enum string"
+            );
+        }
         assert_eq!(
-            serde_json::from_str::<PrintMode>("-1").unwrap(),
-            PrintMode::Other("-1".into())
-        );
-        assert_eq!(
-            serde_json::from_str::<Color>("1.5").unwrap(),
+            serde_json::from_str::<Color>("\"1.5\"").unwrap(),
             Color::Other("1.5".into())
         );
     }

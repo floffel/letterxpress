@@ -15,10 +15,11 @@ bank-transfer forms — and that is what this crate types.
 - validation before the wire (PDF size/magic, `notice` length, bank-form field
   limits and control characters, national-only registered mail, future dispatch
   dates)
-- permissive decoding (unknown fields ignored, unknown enums carried, numbers
-  or strings, `snake_case` or `camelCase`; the one exception is a flag — `c4`,
-  `bank_form` — whose unreadable spelling fails closed instead of defaulting to
-  `false`)
+- permissive decoding where the provider is free-form (unknown fields ignored,
+  unknown enum strings carried, text and ids accepted as numbers or strings,
+  `snake_case` or `camelCase`), with fail-closed rules for status-like enums
+  (JSON strings only) and flags (`c4`, `bank_form`) whose malformed values are
+  refused instead of defaulting
 - strict request vocabularies: `Color`, `PrintMode`, `Shipping`, `Registered`
   and `EmailOption` retain unknown response values in `Other`, but reject them
   in request builders and serde serialization with a typed validation error

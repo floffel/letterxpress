@@ -44,17 +44,15 @@ fn colour_covers_both_documented_values_and_unknown_ones() {
         Color::BlackAndWhite
     );
     assert_eq!(
-        serde_json::from_str::<Color>("0").unwrap(),
-        Color::Other("0".into())
+        serde_json::from_str::<Color>("\"9\"").unwrap(),
+        Color::Other("9".into())
     );
-    assert_eq!(
-        serde_json::from_str::<Color>("true").unwrap(),
-        Color::Other("true".into())
-    );
-    assert_eq!(
-        serde_json::from_str::<Color>("null").unwrap(),
-        Color::Other(String::new())
-    );
+    for invalid in ["0", "true", "null", "{}", "[]"] {
+        assert!(
+            serde_json::from_str::<Color>(invalid).is_err(),
+            "{invalid} is not a wire enum string"
+        );
+    }
 }
 
 #[test]

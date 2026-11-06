@@ -721,6 +721,54 @@ async fn unknown_status_values_are_carried_not_rejected() {
 }
 
 #[tokio::test]
+async fn status_fields_accept_only_json_strings() {
+    for invalid in ["null", "4", "1.0", "true", "{}", "[]"] {
+        let body = format!(r#"{{"status":200,"data":{{"id":1,"status":{invalid},"items":[]}}}}"#);
+        let client = client_for(200, &body);
+        let error = client
+            .print_job(&JobId::new("1").expect("id"))
+            .await
+            .expect_err("a non-string status must fail");
+        let message = error.to_string();
+        assert!(message.contains("field `status`"), "{invalid}: {message}");
+        assert!(
+            message.contains("JSON string"),
+            "{invalid}: the error names the accepted shape: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn null_status_is_refused_but_an_absent_status_uses_the_default() {
+    let null_item = client_for(
+        200,
+        r#"{"status":200,"data":{"id":1,"items":[{"status":null}]}}"#,
+    );
+    let error = null_item
+        .print_job(&JobId::new("1").expect("id"))
+        .await
+        .expect_err("an explicit null item status must fail");
+    assert!(error.to_string().contains("field `status`"), "{error}");
+
+    let absent: PrintJob = serde_json::from_str(r#"{"id":1}"#).expect("absent status defaults");
+    assert_eq!(absent.status, JobStatus::default());
+
+    let absent_item: PrintJob =
+        serde_json::from_str(r#"{"id":1,"items":[{}]}"#).expect("absent item status defaults");
+    assert_eq!(absent_item.items[0].status, JobStatus::default());
+
+    let null_email = client_for(
+        200,
+        r#"{"status":200,"data":{"id":1,"status":null,"email_receiver":"a@b.de"}}"#,
+    );
+    let error = null_email
+        .email_job(&JobId::new("1").expect("id"))
+        .await
+        .expect_err("an explicit null e-mail status must fail");
+    assert!(error.to_string().contains("field `status`"), "{error}");
+}
+
+#[tokio::test]
 async fn camel_case_keys_and_string_numbers_decode() {
     let client = client_with(vec![Response::json_response(
         200,

@@ -273,10 +273,12 @@ Where `registered` sits varies: the quote request sends it next to
 therefore reads either, with one rule: the letter-level code wins **when it
 carries one**, and `null`, `""` or an absent key means "not supplied" and leaves
 the `specification` value in place. It never overwrites a priced `r1`/`r2` with
-"not registered". A letter-level value that is a number goes through the same
-`Registered::from_wire` path as a string (carried verbatim when unknown); a value
-that cannot be a code at all (a nested object or an array) fails the decode
-rather than being reported as unregistered.
+"not registered". A letter-level value must be a JSON string when it names a
+code (unknown strings are carried verbatim after normalization); a number,
+boolean, object or array fails the decode rather than being reported as
+unregistered. A present letter-level `null` keeps the established "not
+supplied" meaning for this optional echo field; an explicit null in a job
+`status` is still a decode error.
 
 A `letter` object **without** a `specification` is a decode error
 (`Error::UnexpectedShape`, `missing field specification`): echoing "zero pages,
@@ -301,7 +303,11 @@ examples:
 
 There is **no** documented `printed`, `in_transit`, `delivered` or `failed` job
 status, and no status-list endpoint. The crate carries unknown strings verbatim
-in `JobStatus::Other(String)`.
+in `JobStatus::Other(String)`. Status-like enums are JSON strings only: a
+present `status` of `null`, a number, boolean, object or array is a typed decode
+error naming `status`, while an absent field uses `JobStatus::default()` where
+the response model requires a value. The decoder never coerces or fabricates a
+status from another JSON shape.
 
 ## 7. Where the monorepo crate (`repr/backend/aws/crates/letterxpress`) deviates
 

@@ -1,14 +1,18 @@
 //! Response models: jobs, e-mail jobs, pages, balances, invoices, journals.
 //!
-//! Every struct decodes permissively: unknown keys are ignored, every documented
-//! scalar is accepted as a number *or* a string, both `snake_case` and
-//! `camelCase` key spellings are accepted, missing optional fields default, and
-//! unknown enum values survive as `Other(String)`. Nothing in here can fail on
-//! a provider that adds a field.
+//! Unknown keys are ignored, documented text and identifier scalars are
+//! accepted as a number *or* a string, both `snake_case` and `camelCase` key
+//! spellings are accepted, missing optional fields default, and unknown string
+//! enum values survive as `Other(String)`. A known field does not get to add a
+//! value the provider documents as impossible: status-like enums accept only
+//! JSON strings, and a non-string value is a decode error naming the field.
 //!
-//! Three things refuse instead of defaulting, because defaulting them would
-//! misreport what the provider billed:
+//! Four things refuse instead of defaulting, because defaulting them would
+//! misreport what the provider billed or fabricated a state:
 //!
+//! * A status-like enum (`status`, `shipping`, `mode`, `color`, `registered`,
+//!   `email_option`): only a JSON string is a wire value. An explicit null in
+//!   a required status is refused; an absent status uses the model default.
 //! * A flag (`c4`, `bank_form`): a value nobody can read — `"y"`, `"on"`, a
 //!   nested object — is a decode error, not a silent `false`. Numbers and their
 //!   string forms follow the same rule, so `1`, `"1"`, `"2"` and `"01"` are all
@@ -22,11 +26,11 @@
 //!   statement about the price that nobody made. See
 //!   [`PriceEcho::from_envelope`].
 //!
-//! The permissiveness is declared, not visited: the scalar shapes (`"7"`, `7`,
-//! `6035138.0`, `true`, null) are one `#[serde(untagged)]` enum that the id,
-//! text and flag decoders share, and the three `POST /v3/emailjobs` answer
-//! shapes are one `#[serde(untagged)]` enum, so `serde` reads the shape from the
-//! payload instead of this module sniffing keys.
+//! Scalar decoding is shared by the id, text and flag decoders: the shapes
+//! (`"7"`, `7`, `6035138.0`, `true`, null) are one `#[serde(untagged)]` enum,
+//! and the three `POST /v3/emailjobs` answer shapes are another. Status-like
+//! enum fields opt out of that permissiveness through their own field-aware
+//! decoders.
 //!
 //! ```
 //! use letterxpress::{Money, PrintJob};
@@ -314,6 +318,72 @@ fn add_reported(sum: Option<Money>, amount: Option<Money>) -> Result<Option<Mone
     }
 }
 
+/// Decodes a required status field, naming it when a non-string arrives.
+///
+/// `#[serde(default)]` is deliberately absent from the call sites: an absent
+/// status invokes [`unspecified_status`], while an explicitly present `null`
+/// must fail instead of masquerading as that default.
+fn de_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<JobStatus, D::Error> {
+    deserialize_wire_field(deserializer, "status")
+}
+
+/// Decodes an optional status-like enum field and reports its wire name.
+fn de_opt_wire_field<'de, D, T>(deserializer: D, field: &'static str) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: for<'any> Deserialize<'any>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Ok(None),
+        value => deserialize_wire_value(value, field).map(Some),
+    }
+}
+
+/// Decodes a status-like enum value, replacing serde's generic shape error
+/// with one that names the response field.
+fn deserialize_wire_field<'de, D, T>(deserializer: D, field: &'static str) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: for<'any> Deserialize<'any>,
+{
+    let value = Value::deserialize(deserializer)?;
+    deserialize_wire_value(value, field)
+}
+
+fn deserialize_wire_value<T, E>(value: Value, field: &'static str) -> Result<T, E>
+where
+    T: for<'de> Deserialize<'de>,
+    E: de::Error,
+{
+    serde_json::from_value(value)
+        .map_err(|error| E::custom(format!("field `{field}` must be a JSON string: {error}")))
+}
+
+fn de_shipping<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Shipping>, D::Error> {
+    de_opt_wire_field(deserializer, "shipping")
+}
+
+fn de_mode<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PrintMode>, D::Error> {
+    de_opt_wire_field(deserializer, "mode")
+}
+
+fn de_color<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Color>, D::Error> {
+    de_opt_wire_field(deserializer, "color")
+}
+
+fn de_registered<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Registered>, D::Error> {
+    de_opt_wire_field(deserializer, "registered")
+}
+
+fn de_email_option<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<EmailOption>, D::Error> {
+    de_opt_wire_field(deserializer, "email_option")
+}
+
 /// The documented ceiling for one letter's page count, and therefore for one
 /// `items[].pages` value in a job response.
 ///
@@ -523,7 +593,10 @@ pub struct PrintItem {
     #[serde(default)]
     pub vat: Option<Money>,
     /// Item state (`queue`, `sent`, …).
-    #[serde(default = "unspecified_status")]
+    ///
+    /// Absent fields use [`JobStatus::default`]. A present non-string value is
+    /// a decode error naming `status`.
+    #[serde(default = "unspecified_status", deserialize_with = "de_status")]
     pub status: JobStatus,
     /// Registered-mail tracking number, when the provider has one.
     #[serde(default, deserialize_with = "de_opt_string", alias = "trackingCode")]
@@ -636,13 +709,17 @@ pub struct PrintJob {
     /// Provider job id.
     pub id: JobId,
     /// Shipping class.
-    #[serde(default)]
+    ///
+    /// Must be a JSON string when present. `null` and an absent field are
+    /// represented as `None`; a number, boolean, object or array is a decode
+    /// error naming `shipping`.
+    #[serde(default, deserialize_with = "de_shipping")]
     pub shipping: Option<Shipping>,
     /// Print mode.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_mode")]
     pub mode: Option<PrintMode>,
     /// Colour.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_color")]
     pub color: Option<Color>,
     /// Whether a C4 envelope was requested.
     ///
@@ -652,7 +729,7 @@ pub struct PrintJob {
     #[serde(default, deserialize_with = "de_flag")]
     pub c4: bool,
     /// Registered-mail option.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_registered")]
     pub registered: Option<Registered>,
     /// Whether a bank form was requested.
     ///
@@ -663,7 +740,10 @@ pub struct PrintJob {
     #[serde(default, deserialize_with = "de_opt_string")]
     pub notice: Option<String>,
     /// Job state.
-    #[serde(default = "unspecified_status")]
+    ///
+    /// Absent fields use [`JobStatus::default`]. A present non-string value is
+    /// a decode error naming `status`.
+    #[serde(default = "unspecified_status", deserialize_with = "de_status")]
     pub status: JobStatus,
     /// Group, when the job was submitted by a serial letter.
     #[serde(default, deserialize_with = "de_opt_string")]
@@ -809,7 +889,7 @@ pub struct EmailJob {
     #[serde(default, deserialize_with = "de_opt_string", alias = "emailReceiver")]
     pub email_receiver: Option<String>,
     /// Delivery option.
-    #[serde(default, alias = "emailOption")]
+    #[serde(default, alias = "emailOption", deserialize_with = "de_email_option")]
     pub email_option: Option<EmailOption>,
     /// Delivery timestamp.
     #[serde(default, deserialize_with = "de_opt_string", alias = "sentAt")]
@@ -821,7 +901,10 @@ pub struct EmailJob {
     #[serde(default)]
     pub vat: Option<Money>,
     /// Job state.
-    #[serde(default = "unspecified_status")]
+    ///
+    /// Absent fields use [`JobStatus::default`]. A present non-string value is
+    /// a decode error naming `status`.
+    #[serde(default = "unspecified_status", deserialize_with = "de_status")]
     pub status: JobStatus,
     /// Subject as extracted from the white-code.
     #[serde(default, deserialize_with = "de_opt_string")]
@@ -1626,26 +1709,22 @@ impl Journal {
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 ///
-/// A code that arrives as a number is not dropped either: it goes through the
-/// same [`Registered::from_wire`] path as a string, so it is normalized like
-/// any other code this crate does not model: surrounding whitespace is trimmed
-/// and ASCII letters are lowercased.
+/// A code must arrive as a JSON string. Unknown strings go through
+/// [`Registered::from_wire`], so surrounding whitespace is trimmed and ASCII
+/// letters are lowercased; another JSON shape is refused and the error names
+/// `registered`. The one exception is the letter-level `null` described above,
+/// which the provider uses for "not supplied".
 ///
 /// ```
 /// use letterxpress::{PriceEcho, Registered};
 ///
-/// let echo = PriceEcho::from_envelope(&serde_json::json!({
-///     "specification": {"pages": 1},
-///     "registered": 2,
-/// }))?;
-/// assert_eq!(echo.registered, Some(Registered::Other("2".into())));
-///
-/// // A value that cannot be a code at all is refused, not guessed at.
-/// let nested = PriceEcho::from_envelope(&serde_json::json!({
-///     "specification": {"pages": 1},
-///     "registered": {"code": "r2"},
-/// }));
-/// assert!(nested.is_err());
+/// for invalid in [serde_json::json!(2), serde_json::json!({"code": "r2"})] {
+///     let refused = PriceEcho::from_envelope(&serde_json::json!({
+///         "specification": {"pages": 1},
+///         "registered": invalid,
+///     }));
+///     assert!(refused.is_err());
+/// }
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 ///
@@ -1675,16 +1754,16 @@ pub struct PriceEcho {
     #[serde(default, deserialize_with = "de_pages")]
     pub pages: u32,
     /// Colour that was priced.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_color")]
     pub color: Option<Color>,
     /// Print mode that was priced.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_mode")]
     pub mode: Option<PrintMode>,
     /// Shipping class that was priced.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_shipping")]
     pub shipping: Option<Shipping>,
     /// SMART@MAIL option that was priced.
-    #[serde(default, alias = "emailOption")]
+    #[serde(default, alias = "emailOption", deserialize_with = "de_email_option")]
     pub email_option: Option<EmailOption>,
     /// Whether a C4 envelope was priced.
     ///
@@ -1692,7 +1771,7 @@ pub struct PriceEcho {
     #[serde(default, deserialize_with = "de_flag")]
     pub c4: bool,
     /// Registered-mail option that was priced.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_registered")]
     pub registered: Option<Registered>,
 }
 
@@ -1739,15 +1818,14 @@ impl PriceEcho {
 /// half that must stay silent about the half it cannot see: an absent key,
 /// `null`, an empty string and a string of blanks all mean "not supplied" and
 /// leave whatever the specification priced untouched. Everything else goes
-/// through [`Registered`]'s own decoding rule, which reads a number as its
-/// string form and carries an unknown code after trimming and ASCII-lowercasing;
-/// a token that is not a code at all fails the deserialiser instead of being
-/// reported as "not registered".
+/// through [`Registered`]'s own decoding rule, which carries an unknown string
+/// code after trimming and ASCII-lowercasing. A token that is not a string fails
+/// the deserializer instead of being reported as "not registered".
 fn letter_registered(value: Option<&Value>) -> Result<Option<Registered>, serde_json::Error> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    match <Registered as Deserialize>::deserialize(value)? {
+    match deserialize_wire_value::<Registered, serde_json::Error>(value.clone(), "registered")? {
         // `""` is the spelling `Registered` uses for a value that is there but
         // names nothing; it is "not supplied", not a code.
         Registered::Other(raw) if raw.is_empty() => Ok(None),
@@ -2193,15 +2271,7 @@ mod tests {
     }
 
     #[test]
-    fn a_non_string_registered_echo_is_carried_instead_of_dropped() {
-        // Only the string form used to be read; a number was thrown away.
-        let echo = PriceEcho::from_envelope(&json!({
-            "specification": {"pages": 1},
-            "registered": 2,
-        }))
-        .unwrap();
-        assert_eq!(echo.registered, Some(Registered::Other("2".into())));
-
+    fn unknown_and_padded_registered_strings_are_normalized() {
         let echo = PriceEcho::from_envelope(&json!({
             "specification": {"pages": 1},
             "registered": "R2",
@@ -2216,6 +2286,79 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(echo.registered, Some(Registered::Other("r7".into())));
+    }
+
+    #[test]
+    fn non_string_status_like_values_name_their_field() {
+        for invalid in [
+            json!(null),
+            json!(4),
+            json!(1.0),
+            json!(true),
+            json!({}),
+            json!([]),
+        ] {
+            let job = json!({"id": 1, "status": invalid});
+            let error = serde_json::from_value::<PrintJob>(job).expect_err("refused");
+            assert!(error.to_string().contains("field `status`"), "{error}");
+            assert!(error.to_string().contains("JSON string"), "{error}");
+        }
+
+        for (field, job) in [
+            ("shipping", json!({"id": 1, "shipping": 2})),
+            ("mode", json!({"id": 1, "mode": false})),
+            ("color", json!({"id": 1, "color": {}})),
+            ("registered", json!({"id": 1, "registered": []})),
+        ] {
+            let error = serde_json::from_value::<PrintJob>(job).expect_err("refused");
+            assert!(
+                error.to_string().contains(&format!("field `{field}`")),
+                "{field}: {error}"
+            );
+        }
+
+        let error = serde_json::from_value::<EmailJob>(json!({
+            "id": 1,
+            "email_option": 4,
+            "status": "queue",
+        }))
+        .expect_err("refused");
+        assert!(
+            error.to_string().contains("field `email_option`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn every_status_decode_boundary_is_explicit() {
+        let known: PrintJob = serde_json::from_value(json!({
+            "id": 1,
+            "status": "done",
+            "items": [{"status": "sent"}],
+        }))
+        .expect("known strings");
+        assert_eq!(known.status, JobStatus::Done);
+        assert_eq!(known.items[0].status, JobStatus::Sent);
+
+        let unknown: PrintJob = serde_json::from_value(json!({
+            "id": 1,
+            "status": "Future-State",
+            "items": [{"status": "Other-State"}],
+        }))
+        .expect("unknown strings are carried");
+        assert_eq!(unknown.status, JobStatus::Other("future-state".into()));
+        assert_eq!(
+            unknown.items[0].status,
+            JobStatus::Other("other-state".into())
+        );
+
+        let absent: PrintJob = serde_json::from_value(json!({
+            "id": 1,
+            "items": [{}],
+        }))
+        .expect("absent fields default");
+        assert_eq!(absent.status, JobStatus::default());
+        assert_eq!(absent.items[0].status, JobStatus::default());
     }
 
     #[test]
