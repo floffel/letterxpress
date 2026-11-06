@@ -35,9 +35,10 @@ use crate::letter::validate_email;
 use crate::response::{parse_envelope, Envelope};
 use crate::transport::{Method, Request, Transport};
 use crate::{
-    AmbiguousKind, Balance, Credentials, Date, Deletion, EmailJob, EmailJobPage,
-    EmailJobSubmission, InvoiceDocument, InvoiceId, InvoicePage, JobFilter, JobId, Journal,
-    JournalType, Letter, Mode, Price, PriceRequest, PrintJob, PrintJobPage, Registered,
+    AmbiguousKind, Balance, CancellationBatch, CancellationJob, CancellationKind,
+    CancellationOutcome, CancellationReport, Credentials, Date, Deletion, EmailJob, EmailJobPage,
+    EmailJobSubmission, InvoiceDocument, InvoiceId, InvoicePage, JobCancellation, JobFilter, JobId,
+    Journal, JournalType, Letter, Mode, Price, PriceRequest, PrintJob, PrintJobPage, Registered,
     Specification, TransactionFilter, TransactionPage, TransportKind,
 };
 use crate::{Error, Result};
@@ -1307,6 +1308,77 @@ impl<T: Transport> Client<T> {
             )
             .await?;
         Ok(envelope.deletion())
+    }
+
+    /// Cancels a validated batch sequentially and reports each job separately.
+    ///
+    /// The provider offers deletion only as a single-job `DELETE` and only
+    /// during the first fifteen minutes after transmission (documentation
+    /// pp. 18 and 25). This helper does not invent a bulk endpoint or fan out
+    /// arbitrary requests: it checks each entry's local monotonic deadline
+    /// before sending, then issues at most one documented `DELETE` at a time.
+    /// A failed deletion is recorded in its own [`JobCancellation`] and does
+    /// not stop the remaining entries.
+    ///
+    /// The batch is already bounded by [`CancellationBatch`]:
+    /// [`MAX_CANCELLATION_BATCH`](crate::MAX_CANCELLATION_BATCH) entries, no
+    /// duplicates, one request each. It performs no retries and no sleeping;
+    /// the caller must account for other traffic against the provider's
+    /// 120-requests-per-minute budget.
+    ///
+    /// ```
+    /// use std::time::Instant;
+    ///
+    /// use letterxpress::{CancellationBatch, CancellationJob, Client, Credentials, JobId, Mode};
+    /// use letterxpress::transport::{MockTransport, Response};
+    ///
+    /// # async fn demo() -> Result<(), letterxpress::Error> {
+    /// let mock = MockTransport::new([
+    ///     Ok(Response::json_response(200, r#"{"status":200,"message":"Print job deleted successfully"}"#)),
+    ///     Ok(Response::json_response(200, r#"{"status":200,"message":"Email job deleted successfully"}"#)),
+    /// ]);
+    /// let client = Client::new(mock, Credentials::new("u", "k", Mode::Test)?);
+    /// let transmitted_at = Instant::now();
+    /// let mut batch = CancellationBatch::try_with_capacity(2)?;
+    /// batch.push(CancellationJob::print(JobId::new("42")?, transmitted_at)?)?;
+    /// batch.push(CancellationJob::email(JobId::new("9")?, transmitted_at)?)?;
+    ///
+    /// let report = client.cancel_batch(&batch).await;
+    /// assert_eq!(report.deleted(), 2);
+    /// assert_eq!(report.failed(), 0);
+    /// assert_eq!(report.window_closed(), 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn cancel_batch(&self, batch: &CancellationBatch) -> CancellationReport {
+        let mut results = Vec::with_capacity(batch.len());
+        for job in batch.iter() {
+            let outcome = self.cancel_one(job, std::time::Instant::now()).await;
+            results.push(JobCancellation::new(job.clone(), outcome));
+        }
+        CancellationReport::new(results)
+    }
+
+    async fn cancel_one(
+        &self,
+        job: &CancellationJob,
+        now: std::time::Instant,
+    ) -> CancellationOutcome {
+        if !job.is_in_window_at(now) {
+            return CancellationOutcome::WindowClosed {
+                transmitted_at: job.transmitted_at(),
+                deadline: job.deadline(),
+            };
+        }
+
+        let deletion = match job.kind() {
+            CancellationKind::PrintJob => self.delete_print_job(job.id()).await,
+            CancellationKind::EmailJob => self.delete_email_job(job.id()).await,
+        };
+        match deletion {
+            Ok(deletion) => CancellationOutcome::Deleted(deletion),
+            Err(error) => CancellationOutcome::Failed(error),
+        }
     }
 
     /// `GET /v3/journal` — the outbound-mail journal as CSV.

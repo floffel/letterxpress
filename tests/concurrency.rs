@@ -98,4 +98,9 @@ fn the_shared_types_are_send_sync_and_static() {
     assert_send_sync::<Credentials>();
     assert_send_sync::<letterxpress::Error>();
     assert_send_sync::<serde_json::Value>();
+    assert_send_sync::<letterxpress::CancellationBatch>();
+    assert_send_sync::<letterxpress::CancellationJob>();
+    assert_send_sync::<letterxpress::CancellationOutcome>();
+    assert_send_sync::<letterxpress::CancellationReport>();
+    assert_send_sync::<letterxpress::JobCancellation>();
 }

@@ -45,14 +45,16 @@
 //! | --- | --- |
 //! | Account | [`Client::balance`] |
 //! | Pricing | [`Client::price`] (`GET /v3/price`, `specification.pages`) |
-//! | Print jobs | [`Client::print_jobs`], [`Client::print_job`], [`Client::submit_print_job`], [`Client::update_print_job`], [`Client::delete_print_job`] |
-//! | E-mail jobs | [`Client::email_jobs`], [`Client::email_job`], [`Client::submit_email_job`], [`Client::update_email_job`], [`Client::delete_email_job`] |
+//! | Print jobs | [`Client::print_jobs`], [`Client::print_job`], [`Client::submit_print_job`], [`Client::update_print_job`], [`Client::delete_print_job`], [`Client::cancel_batch`] |
+//! | E-mail jobs | [`Client::email_jobs`], [`Client::email_job`], [`Client::submit_email_job`], [`Client::update_email_job`], [`Client::delete_email_job`], [`Client::cancel_batch`] |
 //! | Accounting | [`Client::journal`], [`Client::transactions`], [`Client::invoices`], [`Client::invoice`] |
 //!
 //! Deliberate exclusions, all documented in the README: there is no products
-//! endpoint, no separate document upload, no status-list endpoint and no
-//! bulk-cancel — the provider has none of them. `notice` is not an idempotency
-//! key (the API has none), and PDF rendering is the caller's job.
+//! endpoint, no separate document upload and no status-list endpoint. The
+//! provider has no bulk-cancel endpoint either; [`Client::cancel_batch`]
+//! implements the bounded sequence of documented single-job deletes instead.
+//! `notice` is not an idempotency key (the API has none), and PDF rendering is
+//! the caller's job.
 //!
 //! # Design
 //!
@@ -145,6 +147,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod cancellation;
 mod client;
 mod credentials;
 mod date;
@@ -157,6 +160,10 @@ mod types;
 
 pub mod transport;
 
+pub use cancellation::{
+    CancellationBatch, CancellationJob, CancellationKind, CancellationOutcome, CancellationReport,
+    JobCancellation, CANCELLATION_WINDOW, MAX_CANCELLATION_BATCH,
+};
 pub use client::{
     Client, EmailJobQuery, EmailJobUpdate, InvoiceQuery, JournalFilter, PrintJobQuery,
     PrintJobUpdate, TransactionQuery, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, RATE_LIMIT_PER_MINUTE,

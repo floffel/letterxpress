@@ -157,6 +157,10 @@ Filter vocabularies:
 Not documented anywhere, and therefore **not** implemented: a products/catalogue
 endpoint, a separate PDF/document upload endpoint, a status-list endpoint, and a
 bulk-cancel endpoint. Cancellation is `DELETE` on the job within 15 minutes.
+The crate's `CancellationBatch` preserves that provider contract by issuing one
+documented `DELETE` per entry, sequentially, and refusing entries once the local
+fifteen-minute window has closed. A batch accepts at most 120 entries, keeping
+its own request budget to one minute of the documented 120 requests per minute.
 
 ## 5. Response objects
 
