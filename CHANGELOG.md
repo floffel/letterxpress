@@ -16,6 +16,11 @@ All notable changes to this project are documented here.
   `Result<Option<Money>, MoneyError>`; `Some(Money::ZERO)` means a reported zero,
   while `None` means the amount was not reported.
 
+- Split pre-write request-build failures (`TransportKind::Protocol`) from
+  post-write response body failures (`TransportKind::ResponseBody`). A failed
+  response body is retryable for idempotent reads and promoted to
+  `Error::Ambiguous` for submits, so a truncated success response cannot invite
+  a duplicate letter.
 - Reject unknown `Color`, `PrintMode`, `Shipping`, `Registered` and
   `EmailOption` values in request builders and serde serialization. Unknown
   response tokens still decode into `Other(String)` for inspection; the explicit

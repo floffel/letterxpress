@@ -369,7 +369,9 @@ impl Response {
 /// * return the raw status, headers and body even for non-2xx — the client
 ///   decides what is retryable,
 /// * classify connection failures as [`Error::Transport`] with the right
-///   [`TransportKind`], because the ambiguity of a submit depends on it.
+///   [`TransportKind`], because the ambiguity of a submit depends on it. In
+///   particular, a failure after the provider answered belongs in
+///   [`TransportKind::ResponseBody`], not [`TransportKind::Protocol`].
 ///
 /// ```
 /// use letterxpress::transport::{Request, Response, Transport};
@@ -389,7 +391,8 @@ pub trait Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Transport`] when no response could be obtained.
+    /// [`Error::Transport`] when the request could not be built or no complete
+    /// response could be obtained.
     fn execute(&self, request: Request) -> impl std::future::Future<Output = Result<Response>>;
 }
 
@@ -908,7 +911,7 @@ async fn read_response_body(mut response: reqwest::Response, limit: u64) -> Resu
 #[cfg(feature = "http")]
 fn response_body_too_large(limit: u64) -> Error {
     Error::Transport {
-        kind: TransportKind::Protocol,
+        kind: TransportKind::ResponseBody,
         source: Box::new(std::io::Error::other(format!(
             "response body exceeds the {limit}-byte limit"
         ))),
@@ -949,8 +952,10 @@ fn describe_reqwest_error(error: reqwest::Error) -> Error {
         TransportKind::Timeout
     } else if error.is_connect() {
         TransportKind::Connect
-    } else if error.is_builder() || error.is_body() || error.is_decode() || error.is_request() {
+    } else if error.is_builder() {
         TransportKind::Protocol
+    } else if error.is_body() || error.is_decode() {
+        TransportKind::ResponseBody
     } else {
         TransportKind::Io
     };
@@ -1137,7 +1142,7 @@ mod tests {
         let error = runtime
             .block_on(read_response_body(response, MAX_RESPONSE_BODY_BYTES))
             .expect_err("the declared length is over the cap");
-        assert_protocol_error(&error);
+        assert_response_body_error(&error);
         assert!(error
             .to_string()
             .contains(&MAX_RESPONSE_BODY_BYTES.to_string()));
@@ -1167,7 +1172,25 @@ mod tests {
         let error = runtime
             .block_on(read_response_body(response, 8))
             .expect_err("one byte past the streamed limit must fail");
-        assert_protocol_error(&error);
+        assert_response_body_error(&error);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_response_body_that_errors_is_a_post_write_kind() {
+        let response = http_response_with_failing_body(8);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let error = runtime
+            .block_on(read_response_body(response, 16))
+            .expect_err("the response body is truncated");
+
+        assert_response_body_error(&error);
+        assert!(
+            error.to_string().contains("response body"),
+            "the body failure stays in the source chain: {error}"
+        );
     }
 
     #[cfg(feature = "http")]
@@ -1230,6 +1253,41 @@ mod tests {
     }
 
     #[cfg(feature = "http")]
+    fn http_response_with_failing_body(declared: u64) -> reqwest::Response {
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(reqwest::Body::wrap(FailingBody { declared }))
+            .expect("http response");
+        reqwest::Response::from(response)
+    }
+
+    #[cfg(feature = "http")]
+    struct FailingBody {
+        declared: u64,
+    }
+
+    #[cfg(feature = "http")]
+    impl http_body::Body for FailingBody {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+        {
+            std::task::Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "response body ended before its declared length",
+            ))))
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::with_exact(self.declared)
+        }
+    }
+
+    #[cfg(feature = "http")]
     struct ChunkedBody {
         chunks: std::vec::IntoIter<Vec<u8>>,
     }
@@ -1257,19 +1315,19 @@ mod tests {
     }
 
     #[cfg(feature = "http")]
-    fn assert_protocol_error(error: &Error) {
+    fn assert_response_body_error(error: &Error) {
         assert!(
             matches!(
                 error,
                 Error::Transport {
-                    kind: TransportKind::Protocol,
+                    kind: TransportKind::ResponseBody,
                     ..
                 }
             ),
             "{error:?}"
         );
         assert!(!error.is_retryable());
-        assert!(!error.is_retryable_for(true));
+        assert!(error.is_retryable_for(true));
     }
 
     /// Runs the same steps as [`ReqwestTransport::new`] with a caller-chosen

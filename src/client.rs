@@ -1646,9 +1646,11 @@ fn endpoint_label(method: Method, path: &str) -> &'static str {
     }
 }
 
-/// Turns a dead transport into the right error: a submit that timed out *after*
-/// being written may already exist, and the structured [`AmbiguousKind`] says
-/// which of the two transport failures it was.
+/// Turns a dead transport into the right error: a submit that failed after it
+/// was written may already exist, and the structured [`AmbiguousKind`] says
+/// whether the failure was a timeout or a broken response path. A protocol
+/// failure happened while building the request, before anything was sent, and
+/// stays terminal.
 fn classify_transport(error: Error, method: Method) -> Error {
     if method.is_idempotent() {
         return error;
@@ -1667,6 +1669,15 @@ fn classify_transport(error: Error, method: Method) -> Error {
         } => Error::Ambiguous {
             kind: AmbiguousKind::Io,
             message: format!("{method} may have been processed: {source}"),
+        },
+        Error::Transport {
+            kind: TransportKind::ResponseBody,
+            source,
+        } => Error::Ambiguous {
+            kind: AmbiguousKind::Io,
+            message: format!(
+                "{method} may have been processed; the response body failed after the request was written: {source}"
+            ),
         },
         _ => error,
     }
