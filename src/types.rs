@@ -340,7 +340,7 @@ impl JobStatus {
 /// assert_eq!("hold".parse::<JobFilter>().unwrap(), JobFilter::Hold);
 /// assert!("everything".parse::<JobFilter>().is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 #[non_exhaustive]
 pub enum JobFilter {
     /// Orders in the queue.
@@ -422,7 +422,7 @@ impl FromStr for JobFilter {
 /// assert_eq!(TransactionFilter::PrintJobs.as_str(), "printjobs");
 /// assert!("refunds".parse::<TransactionFilter>().is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 #[non_exhaustive]
 pub enum TransactionFilter {
     /// Deposits, vouchers, kickbacks.
@@ -483,7 +483,7 @@ impl FromStr for TransactionFilter {
 /// assert_eq!(JournalType::Print.as_str(), "print");
 /// assert_eq!("mailplus".parse::<JournalType>().unwrap(), JournalType::MailPlus);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 #[non_exhaustive]
 pub enum JournalType {
     /// Printed letters.
