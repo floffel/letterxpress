@@ -141,7 +141,7 @@ All 16 below are documented. Path prefix `/v3` is part of the base URL in the ex
 | 10 | `PUT /v3/emailjobs/{id}` | change recipient (≤ 15 min) | `{auth, email:{email_receiver}}` | one email job | p. 25 | verified |
 | 11 | `DELETE /v3/emailjobs/{id}` | delete (≤ 15 min, not when `success`) | `{auth}` | none, `message` only | p. 25 | verified |
 | 12 | `GET /v3/emailjobs?filter=&page=` | list email jobs | `{auth}` | `{...one job..., ...}, pagination` (the documented example is malformed: the jobs are not wrapped in an array) | p. 26–27 | verified, shape **unverified** |
-| 13 | `GET /v3/journal?searchstr=&type=&start_date=&end_date=` | export journal | `{auth, filter:{type, searchstr, start_date, end_date}}` | `{csv_base64}` | p. 28–29 | verified |
+| 13 | `GET /v3/journal?searchstr=&type=&start_date=&end_date=` | export journal | `{auth}` (filters are query parameters) | `{csv_base64}` | p. 28–29 | verified |
 | 14 | `GET /v3/transactions?filter=&page=` | list transactions | `{auth}` | `{transactions:[...], pagination}` | p. 29–31 | verified |
 | 15 | `GET /v3/invoices?page=` | list invoices | `{auth}` | `{invoices:[...], pagination}` | p. 31–32 | verified |
 | 16 | `GET /v3/invoices/{id}` | one invoice incl. PDF | `{auth}` | `{id, amount, vat, invoice_date, base64_data}` | p. 33 | verified |
@@ -153,6 +153,14 @@ Filter vocabularies:
 | `printjobs` | `queue`, `hold`, `done`, `canceled`, `draft` | p. 12 | verified |
 | `transactions` | `payins`, `payouts`, `printjobs` | p. 30 | verified |
 | `journal` (`filter.type`) | `print`, `maildirect`, `mailsecure`, `mailplus` | p. 29 | verified |
+
+The `GET` examples carry JSON request bodies even though RFC 9110 assigns no
+defined semantics to GET content. This provider is an explicit exception: its
+`auth` object is required in the body on every verb, and `GET /v3/price` places
+the quote request in the body. The journal filters are different: the endpoint
+documents them in the URL (`searchstr`, `type`, `start_date`, `end_date`), so
+the crate sends them percent-encoded there and keeps the journal body to
+`{auth}`. Other GET endpoints must not acquire an endpoint payload body.
 
 Not documented anywhere, and therefore **not** implemented: a products/catalogue
 endpoint, a separate PDF/document upload endpoint, a status-list endpoint, and a

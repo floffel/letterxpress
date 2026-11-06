@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+- Send journal filters as percent-encoded query parameters, leaving only the
+  provider-mandated `auth` object in the GET body. Reject accidental GET
+  endpoint payloads except for the documented `/price` request.
 - Add `CancellationBatch` and `Client::cancel_batch` for bounded, sequential
   cancellation of print and e-mail jobs with one typed result per job. Each
   entry is checked against the provider's fifteen-minute deletion window, and a
