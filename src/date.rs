@@ -93,10 +93,7 @@ impl Date {
                 .enumerate()
                 .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit());
         if !shaped {
-            return Err(Error::invalid(
-                "date",
-                format!("expected yyyy-mm-dd, got {text:?}"),
-            ));
+            return Err(date_shape_error(text));
         }
         let year = text[0..4]
             .parse::<u16>()
@@ -177,6 +174,25 @@ impl Date {
         let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
         era * 146_097 + day_of_era - 719_468
     }
+}
+
+const DATE_ERROR_PREVIEW_CHARS: usize = 32;
+
+fn date_shape_error(text: &str) -> Error {
+    let mut chars = text.chars();
+    let mut preview: String = chars.by_ref().take(DATE_ERROR_PREVIEW_CHARS).collect();
+    if chars.next().is_none() {
+        return Error::invalid("date", format!("expected yyyy-mm-dd, got {text:?}"));
+    }
+
+    preview.push_str("...");
+    Error::invalid(
+        "date",
+        format!(
+            "expected yyyy-mm-dd, got {} bytes starting {preview:?}",
+            text.len()
+        ),
+    )
 }
 
 impl fmt::Display for Date {
@@ -314,5 +330,58 @@ mod tests {
         for text in ["2026-10-é", "2026-10-2４"] {
             assert_validation_error(text);
         }
+    }
+
+    #[test]
+    fn parse_keeps_the_existing_message_for_ordinary_invalid_dates() {
+        let error = Date::parse("2026-10-2").expect_err("invalid date");
+        assert_eq!(
+            error.to_string(),
+            "invalid date: expected yyyy-mm-dd, got \"2026-10-2\""
+        );
+    }
+
+    #[test]
+    fn parse_truncates_the_error_preview_after_32_characters() {
+        let at_limit = "x".repeat(32);
+        let error = Date::parse(&at_limit).expect_err("invalid date");
+        assert_eq!(
+            error.to_string(),
+            format!("invalid date: expected yyyy-mm-dd, got {at_limit:?}")
+        );
+
+        let over_limit = format!("{at_limit}y");
+        let error = Date::parse(&over_limit).expect_err("invalid date");
+        assert!(matches!(error, Error::Validation { field: "date", .. }));
+        assert_eq!(
+            error.to_string(),
+            format!("invalid date: expected yyyy-mm-dd, got 33 bytes starting \"{at_limit}...\"")
+        );
+    }
+
+    #[test]
+    fn parse_bounds_the_error_preview_for_large_inputs() {
+        let tail = "UNBOUNDED-TAIL-MARKER";
+        let text = format!("{}{tail}", "x".repeat(4096));
+        let error = Date::parse(&text).expect_err("invalid date");
+
+        assert!(matches!(error, Error::Validation { field: "date", .. }));
+        let rendered = error.to_string();
+        assert!(rendered.contains(&format!("{} bytes", text.len())));
+        assert!(rendered.contains(&format!("starting \"{}...\"", "x".repeat(32))));
+        assert!(!rendered.contains(&"x".repeat(33)));
+        assert!(!rendered.contains(tail));
+    }
+
+    #[test]
+    fn parse_preview_uses_characters_but_reports_bytes() {
+        let text = "é".repeat(33);
+        let error = Date::parse(&text).expect_err("invalid date");
+
+        assert!(matches!(error, Error::Validation { field: "date", .. }));
+        let rendered = error.to_string();
+        assert!(rendered.contains(&format!("{} bytes", text.len())));
+        assert!(rendered.contains(&format!("starting \"{}...\"", "é".repeat(32))));
+        assert!(!rendered.contains(&"é".repeat(33)));
     }
 }
