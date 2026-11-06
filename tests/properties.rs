@@ -1037,4 +1037,21 @@ proptest! {
             }
         }
     }
+
+    /// An explicit next-page link is sufficient for continuation, whether or
+    /// not the provider included or correctly populated the page counters.
+    #[test]
+    fn an_explicit_next_page_always_means_there_is_another_page(
+        current_page in any::<u32>(),
+        last_page in any::<u32>(),
+        present in any::<bool>(),
+    ) {
+        let page = letterxpress::Pagination {
+            current_page,
+            last_page,
+            next_page_url: present.then(|| "https://api.letterxpress.de/v3/invoices?page=2".into()),
+            ..letterxpress::Pagination::default()
+        };
+        prop_assert_eq!(page.has_next(), present || current_page < last_page);
+    }
 }

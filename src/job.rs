@@ -1098,46 +1098,104 @@ impl<'de> Deserialize<'de> for EmailJobSubmission {
 /// assert_eq!(page.per_page, 15);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Pagination {
     /// Total entries across all pages.
-    #[serde(default)]
     pub total: u32,
     /// Entries on this page.
-    #[serde(default)]
     pub count: u32,
     /// Current page, 1-based.
-    #[serde(default)]
     pub current_page: u32,
     /// Last page.
-    #[serde(default)]
     pub last_page: u32,
     /// Page size (15 in every documented example).
-    #[serde(default)]
     pub per_page: u32,
     /// First-page URL.
-    #[serde(default, deserialize_with = "de_opt_string", alias = "firstPageUrl")]
     pub first_page_url: Option<String>,
     /// Last-page URL.
-    #[serde(default, deserialize_with = "de_opt_string", alias = "lastPageUrl")]
     pub last_page_url: Option<String>,
     /// Previous-page URL.
-    #[serde(default, deserialize_with = "de_opt_string", alias = "prevPageUrl")]
     pub prev_page_url: Option<String>,
     /// Next-page URL.
-    #[serde(default, deserialize_with = "de_opt_string", alias = "nextPageUrl")]
     pub next_page_url: Option<String>,
 }
 
 impl Pagination {
     /// Whether another page exists.
     ///
+    /// Continuation follows the provider's explicit next-page link as well as
+    /// the page numbers. A response that omits or understates `last_page` must
+    /// not make a non-final page look complete.
+    ///
     /// ```
-    /// assert!(!letterxpress::Pagination::default().has_next());
+    /// use letterxpress::Pagination;
+    ///
+    /// assert!(!Pagination::default().has_next());
+    ///
+    /// let linked: Pagination = serde_json::from_str(
+    ///     r#"{"current_page":1,"next_page_url":"https://api.letterxpress.de/v3/invoices?page=2"}"#,
+    /// )?;
+    /// assert!(linked.has_next());
+    /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
     pub fn has_next(&self) -> bool {
-        self.current_page < self.last_page
+        self.next_page_url.is_some() || self.current_page < self.last_page
+    }
+}
+
+/// Wire representation used to distinguish an absent count from a zero.
+#[derive(Deserialize)]
+struct PaginationWire {
+    #[serde(default)]
+    total: u32,
+    #[serde(default)]
+    count: u32,
+    #[serde(default)]
+    current_page: Option<u32>,
+    #[serde(default)]
+    last_page: Option<u32>,
+    #[serde(default)]
+    per_page: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_string", alias = "firstPageUrl")]
+    first_page_url: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string", alias = "lastPageUrl")]
+    last_page_url: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string", alias = "prevPageUrl")]
+    prev_page_url: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string", alias = "nextPageUrl")]
+    next_page_url: Option<String>,
+}
+
+impl TryFrom<PaginationWire> for Pagination {
+    type Error = &'static str;
+
+    fn try_from(wire: PaginationWire) -> Result<Self, Self::Error> {
+        if wire.per_page == Some(0) {
+            return Err("pagination.per_page must be at least 1 when supplied");
+        }
+        if let (Some(current_page), Some(last_page)) = (wire.current_page, wire.last_page) {
+            if last_page < current_page {
+                return Err("pagination.last_page must not precede current_page");
+            }
+        }
+        Ok(Self {
+            total: wire.total,
+            count: wire.count,
+            current_page: wire.current_page.unwrap_or_default(),
+            last_page: wire.last_page.unwrap_or_default(),
+            per_page: wire.per_page.unwrap_or_default(),
+            first_page_url: wire.first_page_url,
+            last_page_url: wire.last_page_url,
+            prev_page_url: wire.prev_page_url,
+            next_page_url: wire.next_page_url,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Pagination {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(PaginationWire::deserialize(deserializer)?).map_err(de::Error::custom)
     }
 }
 
