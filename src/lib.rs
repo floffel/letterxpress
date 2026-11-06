@@ -32,7 +32,7 @@
 //!     .with_notice("antrag-4711")?;
 //!
 //! let job = client.submit_print_job(&letter).await?;
-//! println!("job {} at {}", job.id, job.total()?);
+//! println!("job {} at {:?}", job.id, job.total()?);
 //! # Ok(())
 //! # }
 //! ```

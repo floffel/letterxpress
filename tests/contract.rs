@@ -64,9 +64,12 @@ async fn print_job_list_matches_the_documented_example() {
         Some("Jim Knopf, Bahnhofstr. 1, 21337 Lüneburg")
     );
     assert_eq!(item.pages, 1);
-    assert_eq!(item.net.cents(), 67);
-    assert_eq!(item.vat.cents(), 13);
-    assert_eq!(item.total().expect("total").cents(), 80);
+    assert_eq!(item.net.map(letterxpress::Money::cents), Some(67));
+    assert_eq!(item.vat.map(letterxpress::Money::cents), Some(13));
+    assert_eq!(
+        item.total().expect("total").map(letterxpress::Money::cents),
+        Some(80)
+    );
     assert_eq!(item.status, JobStatus::Sent);
     assert_eq!(item.tracking_code.as_deref(), Some("RC123456789DE"));
     assert_eq!(
@@ -91,7 +94,10 @@ async fn created_print_job_reports_queue_state_and_gross_price() {
 
     assert_eq!(job.id.as_str(), "6035143");
     assert_eq!(job.status, JobStatus::Queue);
-    assert_eq!(job.total().expect("total").cents(), 81);
+    assert_eq!(
+        job.total().expect("total").map(letterxpress::Money::cents),
+        Some(81)
+    );
     assert_eq!(job.pages(), 1);
     assert!(!job.is_terminal());
 }
@@ -126,7 +132,10 @@ async fn updated_print_job_shows_the_new_options() {
     assert_eq!(job.notice.as_deref(), Some("KdNr. xxxxx"));
     assert_eq!(job.dispatch_date.as_deref(), Some("2022-09-01"));
     assert_eq!(job.color, Some(Color::Color));
-    assert_eq!(job.total().expect("total").cents(), 180);
+    assert_eq!(
+        job.total().expect("total").map(letterxpress::Money::cents),
+        Some(180)
+    );
 }
 
 #[tokio::test]
@@ -160,7 +169,10 @@ async fn single_email_job_carries_its_print_job() {
 
     assert_eq!(job.id.as_str(), "3096");
     assert_eq!(job.status, JobStatus::Queue);
-    assert_eq!(job.total().expect("total").cents(), 12);
+    assert_eq!(
+        job.total().expect("total").map(letterxpress::Money::cents),
+        Some(12)
+    );
     assert_eq!(job.email_option, Some(letterxpress::EmailOption::MailPlus));
     let printjob = job.printjob.expect("nested print job");
     assert_eq!(printjob.id.as_str(), "138040");
@@ -307,36 +319,22 @@ async fn journal_returns_the_documented_csv() {
 }
 
 #[tokio::test]
-async fn transactions_reject_the_documented_negative_values() {
+async fn transactions_keep_signed_debits_and_credits() {
     let client = client_with(vec![fixture_response("transactions.json")]);
-    let error = client
-        .transactions(&letterxpress::TransactionQuery::new())
-        .await
-        .expect_err("negative Money is invalid");
-
-    assert!(matches!(
-        error,
-        letterxpress::Error::UnexpectedShape {
-            endpoint: "GET /v3/transactions",
-            ..
-        }
-    ));
-}
-
-#[tokio::test]
-async fn transactions_keep_nonnegative_amounts_and_pagination() {
-    let positive = fixture("transactions.json")
-        .replace("-1.04", "1.04")
-        .replace("-0.81", "0.81");
-    let client = client_with(vec![Response::json_response(200, positive)]);
     let page: TransactionPage = client
         .transactions(&letterxpress::TransactionQuery::new())
         .await
         .expect("transactions");
 
     assert_eq!(page.entries.len(), 4);
-    assert_eq!(page.entries[0].amount.cents(), 104);
-    assert_eq!(page.entries[2].amount.cents(), 100_000);
+    assert_eq!(
+        page.entries[0].amount.map(letterxpress::Money::cents),
+        Some(-104)
+    );
+    assert_eq!(
+        page.entries[2].amount.map(letterxpress::Money::cents),
+        Some(100_000)
+    );
     assert_eq!(
         page.entries[0].description.as_deref(),
         Some("Farbe, Doppelseitig, National, 2 Seiten")
@@ -355,9 +353,15 @@ async fn invoices_expose_net_tax_and_gross() {
     assert_eq!(page.invoices.len(), 5);
     let first: &Invoice = &page.invoices[0];
     assert_eq!(first.id.as_str(), "25402");
-    assert_eq!(first.amount.cents(), 67);
-    assert_eq!(first.vat.cents(), 13);
-    assert_eq!(first.total().expect("total").cents(), 80);
+    assert_eq!(first.amount.map(letterxpress::Money::cents), Some(67));
+    assert_eq!(first.vat.map(letterxpress::Money::cents), Some(13));
+    assert_eq!(
+        first
+            .total()
+            .expect("total")
+            .map(letterxpress::Money::cents),
+        Some(80)
+    );
     assert_eq!(first.invoice_date.as_deref(), Some("2020-05-31"));
     assert_eq!(page.pagination.expect("pagination").total, 5);
 }

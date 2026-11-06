@@ -29,7 +29,7 @@
 //! payload instead of this module sniffing keys.
 //!
 //! ```
-//! use letterxpress::PrintJob;
+//! use letterxpress::{Money, PrintJob};
 //!
 //! let job: PrintJob = serde_json::from_str(r#"{
 //!     "id": 6035138,
@@ -38,7 +38,7 @@
 //!     "some_future_field": {"nested": true}
 //! }"#)?;
 //! assert_eq!(job.id.as_str(), "6035138");
-//! assert_eq!(job.items[0].total()?.cents(), 80);
+//! assert_eq!(job.items[0].total()?.map(Money::cents), Some(80));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -306,6 +306,14 @@ fn unspecified_status() -> JobStatus {
     JobStatus::Other(String::new())
 }
 
+/// Adds a reported value to an aggregate without turning unknown into zero.
+fn add_reported(sum: Option<Money>, amount: Option<Money>) -> Result<Option<Money>, MoneyError> {
+    match (sum, amount) {
+        (Some(sum), Some(amount)) => sum.checked_add(amount).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// The documented ceiling for one letter's page count, and therefore for one
 /// `items[].pages` value in a job response.
 ///
@@ -485,14 +493,14 @@ fn de_items<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<PrintItem>
 /// [`PrintItem::total`] — the documentation's own ledger confirms it.
 ///
 /// ```
-/// use letterxpress::PrintItem;
+/// use letterxpress::{Money, PrintItem};
 ///
 /// let item: PrintItem = serde_json::from_str(
 ///     r#"{"address":"Jim Knopf, Bahnhofstr. 1, 21337 Lüneburg","pages":1,"amount":0.68,"vat":0.13,"status":"sent"}"#,
 /// )?;
-/// assert_eq!(item.net.cents(), 68);
-/// assert_eq!(item.vat.cents(), 13);
-/// assert_eq!(item.total()?.cents(), 81);
+/// assert_eq!(item.net.map(Money::cents), Some(68));
+/// assert_eq!(item.vat.map(Money::cents), Some(13));
+/// assert_eq!(item.total()?.map(Money::cents), Some(81));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -508,12 +516,12 @@ pub struct PrintItem {
     /// total or a cost estimate.
     #[serde(default, deserialize_with = "de_pages")]
     pub pages: u32,
-    /// Net amount (wire key `amount`).
+    /// Net amount (wire key `amount`), or `None` when not reported.
     #[serde(default, rename = "amount")]
-    pub net: Money,
-    /// Tax share.
+    pub net: Option<Money>,
+    /// Tax share, or `None` when not reported.
     #[serde(default)]
-    pub vat: Money,
+    pub vat: Option<Money>,
     /// Item state (`queue`, `sent`, …).
     #[serde(default = "unspecified_status")]
     pub status: JobStatus,
@@ -526,23 +534,23 @@ pub struct PrintItem {
 }
 
 impl PrintItem {
-    /// Net amount.
+    /// Net amount, when reported.
     ///
     /// ```
-    /// assert_eq!(letterxpress::PrintItem::default().net.cents(), 0);
+    /// assert_eq!(letterxpress::PrintItem::default().net, None);
     /// ```
     #[must_use]
-    pub fn net(&self) -> Money {
+    pub fn net(&self) -> Option<Money> {
         self.net
     }
 
-    /// Tax share.
+    /// Tax share, when reported.
     ///
     /// ```
-    /// assert_eq!(letterxpress::PrintItem::default().vat.cents(), 0);
+    /// assert_eq!(letterxpress::PrintItem::default().vat, None);
     /// ```
     #[must_use]
-    pub fn vat(&self) -> Money {
+    pub fn vat(&self) -> Option<Money> {
         self.vat
     }
 
@@ -550,21 +558,26 @@ impl PrintItem {
     ///
     /// # Errors
     ///
-    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows. The outer `None`
+    /// means the provider did not report both components; it is never treated
+    /// as zero.
     ///
     /// ```
     /// use letterxpress::{Money, PrintItem};
     ///
     /// let item = PrintItem {
-    ///     net: Money::from_euros(0.67)?,
-    ///     vat: Money::from_euros(0.13)?,
+    ///     net: Some(Money::from_euros(0.67)?),
+    ///     vat: Some(Money::from_euros(0.13)?),
     ///     ..PrintItem::default()
     /// };
-    /// assert_eq!(item.total()?.cents(), 80);
+    /// assert_eq!(item.total()?.map(Money::cents), Some(80));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn total(&self) -> Result<Money, MoneyError> {
-        self.net.total(self.vat)
+    pub fn total(&self) -> Result<Option<Money>, MoneyError> {
+        match (self.net, self.vat) {
+            (Some(net), Some(vat)) => net.total(vat).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -718,32 +731,35 @@ impl PrintJob {
     ///
     /// # Errors
     ///
-    /// [`MoneyError::OutOfRange`] if a cent sum overflows.
+    /// [`MoneyError::OutOfRange`] if a cent sum overflows. `None` means at
+    /// least one item omitted a net amount, so the aggregate is unknown.
     ///
     /// ```
-    /// assert!(letterxpress::PrintJob::default().net()?.is_zero());
+    /// assert!(letterxpress::PrintJob::default().net()?.unwrap().is_zero());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn net(&self) -> Result<Money, MoneyError> {
+    pub fn net(&self) -> Result<Option<Money>, MoneyError> {
         self.items
             .iter()
-            .try_fold(Money::ZERO, |sum, item| sum.checked_add(item.net))
+            .try_fold(Some(Money::ZERO), |sum, item| add_reported(sum, item.net))
     }
 
     /// Gross sum across items — the amount billed for this job.
     ///
     /// # Errors
     ///
-    /// [`MoneyError::OutOfRange`] if a cent sum overflows.
+    /// [`MoneyError::OutOfRange`] if a cent sum overflows. `None` means any
+    /// item has an unreported component; an empty job is `Some(ZERO)` because
+    /// no amount was omitted.
     ///
     /// ```
-    /// assert!(letterxpress::PrintJob::default().total()?.is_zero());
+    /// assert!(letterxpress::PrintJob::default().total()?.unwrap().is_zero());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn total(&self) -> Result<Money, MoneyError> {
-        self.items
-            .iter()
-            .try_fold(Money::ZERO, |sum, item| sum.checked_add(item.total()?))
+    pub fn total(&self) -> Result<Option<Money>, MoneyError> {
+        self.items.iter().try_fold(Some(Money::ZERO), |sum, item| {
+            add_reported(sum, item.total()?)
+        })
     }
 
     /// The first tracking code, when the job is registered mail.
@@ -772,14 +788,14 @@ impl PrintJob {
 /// A SMART@MAIL job.
 ///
 /// ```
-/// use letterxpress::EmailJob;
+/// use letterxpress::{EmailJob, Money};
 ///
 /// let job: EmailJob = serde_json::from_str(
 ///     r#"{"id":3813,"email_receiver":"userone@letterxpress.de","email_option":"maildirect",
 ///         "amount":0.05,"vat":0.01,"status":"queue","subject":"Monats Rechnung"}"#,
 /// )?;
 /// assert_eq!(job.status, letterxpress::JobStatus::Queue);
-/// assert_eq!(job.total()?.cents(), 6);
+/// assert_eq!(job.total()?.map(Money::cents), Some(6));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -798,12 +814,12 @@ pub struct EmailJob {
     /// Delivery timestamp.
     #[serde(default, deserialize_with = "de_opt_string", alias = "sentAt")]
     pub sent_at: Option<String>,
-    /// Net amount (wire key `amount`).
+    /// Net amount (wire key `amount`), or `None` when not reported.
     #[serde(default, rename = "amount")]
-    pub net: Money,
-    /// Tax share.
+    pub net: Option<Money>,
+    /// Tax share, or `None` when not reported.
     #[serde(default)]
-    pub vat: Money,
+    pub vat: Option<Money>,
     /// Job state.
     #[serde(default = "unspecified_status")]
     pub status: JobStatus,
@@ -831,38 +847,42 @@ pub struct EmailJob {
 }
 
 impl EmailJob {
-    /// Net amount.
+    /// Net amount, when reported.
     ///
     /// ```
-    /// assert!(letterxpress::EmailJob::default().net().is_zero());
+    /// assert_eq!(letterxpress::EmailJob::default().net(), None);
     /// ```
     #[must_use]
-    pub fn net(&self) -> Money {
+    pub fn net(&self) -> Option<Money> {
         self.net
     }
 
-    /// Tax share.
+    /// Tax share, when reported.
     ///
     /// ```
-    /// assert!(letterxpress::EmailJob::default().vat().is_zero());
+    /// assert_eq!(letterxpress::EmailJob::default().vat(), None);
     /// ```
     #[must_use]
-    pub fn vat(&self) -> Money {
+    pub fn vat(&self) -> Option<Money> {
         self.vat
     }
 
-    /// Net plus tax.
+    /// Net plus tax, when both components were reported.
     ///
     /// # Errors
     ///
-    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows. `None` means the
+    /// provider omitted at least one component.
     ///
     /// ```
-    /// assert!(letterxpress::EmailJob::default().total()?.is_zero());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// assert_eq!(letterxpress::EmailJob::default().total()?, None);
+    /// # Ok::<(), letterxpress::MoneyError>(())
     /// ```
-    pub fn total(&self) -> Result<Money, MoneyError> {
-        self.net.total(self.vat)
+    pub fn total(&self) -> Result<Option<Money>, MoneyError> {
+        match (self.net, self.vat) {
+            (Some(net), Some(vat)) => net.total(vat).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -874,8 +894,8 @@ impl Default for EmailJob {
             email_receiver: None,
             email_option: None,
             sent_at: None,
-            net: Money::ZERO,
-            vat: Money::ZERO,
+            net: None,
+            vat: None,
             status: unspecified_status(),
             subject: None,
             content: None,
@@ -1335,23 +1355,23 @@ impl Balance {
 
 /// One ledger entry (`GET /v3/transactions`).
 ///
-/// Amounts are nonnegative: negative ledger values are not a [`Money`] and are
-/// rejected at the decode boundary.
+/// Ledger debits are negative and credits positive. Both are exact signed
+/// [`Money`] values.
 ///
 /// ```
-/// use letterxpress::Transaction;
+/// use letterxpress::{Money, Transaction};
 ///
 /// let entry: Transaction = serde_json::from_str(
 ///     r#"{"amount":0.81,"currency":"EUR","description":"Schwarzweiß, Einseitig, National, 1 Seite","created_at":"2022-09-21 11:45:28"}"#,
 /// )?;
-/// assert_eq!(entry.amount.cents(), 81);
+/// assert_eq!(entry.amount.map(Money::cents), Some(81));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Transaction {
-    /// Nonnegative amount. A negative value fails decoding.
+    /// Signed amount, or `None` when not reported.
     #[serde(default)]
-    pub amount: Money,
+    pub amount: Option<Money>,
     /// Currency.
     #[serde(default, deserialize_with = "de_opt_string")]
     pub currency: Option<String>,
@@ -1385,23 +1405,23 @@ pub struct TransactionPage {
 /// An invoice summary (`GET /v3/invoices`).
 ///
 /// ```
-/// use letterxpress::Invoice;
+/// use letterxpress::{Invoice, Money};
 ///
 /// let invoice: Invoice = serde_json::from_str(r#"{"id":25402,"amount":0.67,"vat":0.13,"invoice_date":"2020-05-31"}"#)?;
-/// assert_eq!(invoice.total()?.cents(), 80);
-/// assert_eq!(invoice.amount.cents(), 67);
+/// assert_eq!(invoice.total()?.map(Money::cents), Some(80));
+/// assert_eq!(invoice.amount.map(Money::cents), Some(67));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Invoice {
     /// Invoice id.
     pub id: InvoiceId,
-    /// Net amount.
+    /// Net amount, or `None` when not reported.
     #[serde(default)]
-    pub amount: Money,
-    /// Tax share.
+    pub amount: Option<Money>,
+    /// Tax share, or `None` when not reported.
     #[serde(default)]
-    pub vat: Money,
+    pub vat: Option<Money>,
     /// Invoice date, `yyyy-mm-dd`.
     #[serde(default, deserialize_with = "de_opt_string", alias = "invoiceDate")]
     pub invoice_date: Option<String>,
@@ -1412,21 +1432,25 @@ impl Invoice {
     ///
     /// # Errors
     ///
-    /// [`MoneyError::OutOfRange`] if the cent sum overflows.
+    /// [`MoneyError::OutOfRange`] if the cent sum overflows. `None` means the
+    /// provider omitted either component, so the invoiced amount is unknown.
     ///
     /// ```
     /// use letterxpress::{Invoice, Money};
     ///
     /// let invoice = Invoice {
-    ///     amount: Money::from_euros(0.67)?,
-    ///     vat: Money::from_euros(0.13)?,
+    ///     amount: Some(Money::from_euros(0.67)?),
+    ///     vat: Some(Money::from_euros(0.13)?),
     ///     ..Invoice::default()
     /// };
-    /// assert_eq!(invoice.total()?.cents(), 80);
+    /// assert_eq!(invoice.total()?.map(Money::cents), Some(80));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn total(&self) -> Result<Money, MoneyError> {
-        self.amount.total(self.vat)
+    pub fn total(&self) -> Result<Option<Money>, MoneyError> {
+        match (self.amount, self.vat) {
+            (Some(amount), Some(vat)) => amount.total(vat).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 
