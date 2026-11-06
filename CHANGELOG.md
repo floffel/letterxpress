@@ -26,6 +26,11 @@ All notable changes to this project are documented here.
   response tokens still decode into `Other(String)` for inspection; the explicit
   `to_request` conversion and the affected setters now return a typed validation
   error rather than sending provider-impossible values.
+- Derive the wire string and display conversions for the closed request enums
+  with `strum`, and use one `strum`-backed implementation for the macro-backed
+  wire enums. Their public `FromStr` methods remain deliberately custom so
+  trimming, ASCII case-insensitivity, and the crate's typed `Error` contract do
+  not change.
 - Send journal filters as percent-encoded query parameters, leaving only the
   provider-mandated `auth` object in the GET body. Reject accidental GET
   endpoint payloads except for the documented `/price` request.

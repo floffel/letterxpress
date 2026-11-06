@@ -10,6 +10,11 @@
 //! `to_request` conversion reject it. [`JobFilter`], [`TransactionFilter`] and
 //! [`JournalType`] have no `Other` at all, because guessing a filter value
 //! would silently return the wrong result set.
+//!
+//! `strum` derives the display and string conversions from the same wire
+//! spellings that [`from_wire`](PrintMode::from_wire) matches. Their `FromStr`
+//! implementations stay hand-written deliberately: the public contract trims
+//! whitespace and returns this crate's typed [`Error`], not `strum::ParseError`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -33,17 +38,27 @@ macro_rules! wire_enum {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            Hash,
+            strum::AsRefStr,
+            strum::Display,
+        )]
         #[non_exhaustive]
         pub enum $name {
             $(
                 $(#[$variant_meta])*
+                #[strum(to_string = $wire, serialize = $wire $(, serialize = $alias)*)]
                 $variant,
             )+
             /// A value this crate does not model yet, with surrounding
             /// whitespace trimmed and ASCII letters lowercased.
             ///
             /// Non-ASCII characters are preserved as sent.
+            #[strum(transparent)]
             ///
             /// ```
             #[doc = concat!("# use letterxpress::", stringify!($name), ";")]
@@ -63,10 +78,7 @@ macro_rules! wire_enum {
             /// ```
             #[must_use]
             pub fn as_str(&self) -> &str {
-                match self {
-                    $(Self::$variant => $wire,)+
-                    Self::Other(raw) => raw,
-                }
+                self.as_ref()
             }
 
             /// Parses a wire value, matching case-insensitively after trimming
@@ -121,12 +133,6 @@ macro_rules! wire_enum {
                         ),
                     )),
                 }
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
             }
         }
 
@@ -398,18 +404,25 @@ impl JobStatus {
 /// assert_eq!("hold".parse::<JobFilter>().unwrap(), JobFilter::Hold);
 /// assert!("everything".parse::<JobFilter>().is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
 #[non_exhaustive]
 pub enum JobFilter {
     /// Orders in the queue.
+    #[strum(serialize = "queue")]
     Queue,
     /// Paused orders.
+    #[strum(serialize = "hold")]
     Hold,
     /// Processed orders.
+    #[strum(serialize = "done")]
     Done,
     /// Canceled orders.
+    #[strum(serialize = "canceled")]
     Canceled,
     /// Orders in the postbox.
+    #[strum(serialize = "draft")]
     Draft,
 }
 
@@ -421,13 +434,7 @@ impl JobFilter {
     /// ```
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queue => "queue",
-            Self::Hold => "hold",
-            Self::Done => "done",
-            Self::Canceled => "canceled",
-            Self::Draft => "draft",
-        }
+        self.into()
     }
 
     /// Whether this filter selects jobs that sit in the Postbox (test mode).
@@ -455,12 +462,8 @@ impl JobFilter {
     ];
 }
 
-impl fmt::Display for JobFilter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
+// Kept custom: `strum::EnumString` would change trimming, error type, and the
+// public parsing contract.
 impl FromStr for JobFilter {
     type Err = Error;
 
@@ -480,14 +483,19 @@ impl FromStr for JobFilter {
 /// assert_eq!(TransactionFilter::PrintJobs.as_str(), "printjobs");
 /// assert!("refunds".parse::<TransactionFilter>().is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
 #[non_exhaustive]
 pub enum TransactionFilter {
     /// Deposits, vouchers, kickbacks.
+    #[strum(serialize = "payins")]
     PayIns,
     /// Payouts.
+    #[strum(serialize = "payouts")]
     PayOuts,
     /// Job charges.
+    #[strum(serialize = "printjobs")]
     PrintJobs,
 }
 
@@ -499,11 +507,7 @@ impl TransactionFilter {
     /// ```
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PayIns => "payins",
-            Self::PayOuts => "payouts",
-            Self::PrintJobs => "printjobs",
-        }
+        self.into()
     }
 
     /// Every documented filter value.
@@ -514,12 +518,8 @@ impl TransactionFilter {
     pub const ALL: [Self; 3] = [Self::PayIns, Self::PayOuts, Self::PrintJobs];
 }
 
-impl fmt::Display for TransactionFilter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
+// Kept custom: `strum::EnumString` would change trimming, error type, and the
+// public parsing contract.
 impl FromStr for TransactionFilter {
     type Err = Error;
 
@@ -541,16 +541,22 @@ impl FromStr for TransactionFilter {
 /// assert_eq!(JournalType::Print.as_str(), "print");
 /// assert_eq!("mailplus".parse::<JournalType>().unwrap(), JournalType::MailPlus);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumIter, strum::IntoStaticStr,
+)]
 #[non_exhaustive]
 pub enum JournalType {
     /// Printed letters.
+    #[strum(serialize = "print")]
     Print,
     /// `maildirect` e-mail jobs.
+    #[strum(serialize = "maildirect")]
     MailDirect,
     /// `mailsecure` e-mail jobs.
+    #[strum(serialize = "mailsecure")]
     MailSecure,
     /// `mailplus` e-mail jobs.
+    #[strum(serialize = "mailplus")]
     MailPlus,
 }
 
@@ -562,12 +568,7 @@ impl JournalType {
     /// ```
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Print => "print",
-            Self::MailDirect => "maildirect",
-            Self::MailSecure => "mailsecure",
-            Self::MailPlus => "mailplus",
-        }
+        self.into()
     }
 
     /// Every documented journal type.
@@ -583,12 +584,8 @@ impl JournalType {
     ];
 }
 
-impl fmt::Display for JournalType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
+// Kept custom: `strum::EnumString` would change trimming, error type, and the
+// public parsing contract.
 impl FromStr for JournalType {
     type Err = Error;
 
