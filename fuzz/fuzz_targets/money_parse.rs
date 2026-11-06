@@ -1,5 +1,6 @@
-//! Fuzz target: [`Money::parse`] must never panic on arbitrary UTF-8 input, and
-//! every accepted amount must round-trip through its canonical decimal form.
+//! Fuzz target: [`Money::parse`] and JSON deserialization of [`Money`] must
+//! never panic on untrusted provider input. Every accepted amount must preserve
+//! its canonical decimal representation.
 //!
 //! Run with `cargo +nightly fuzz run money_parse`.
 
@@ -13,9 +14,14 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let Ok(money) = Money::parse(text) else {
-        return;
-    };
+    if let Ok(money) = Money::parse(text) {
+        assert_eq!(Money::parse(&money.to_string()), Ok(money));
+    }
 
-    assert_eq!(Money::parse(&money.to_string()).ok(), Some(money));
+    if let Ok(money) = serde_json::from_str::<Money>(text) {
+        assert!(money.cents() >= 0);
+        assert_eq!(Money::parse(&money.to_string()), Ok(money));
+        let quoted = format!("\"{money}\"");
+        assert_eq!(serde_json::from_str::<Money>(&quoted).ok(), Some(money));
+    }
 });

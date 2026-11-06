@@ -1977,6 +1977,49 @@ fn money_helpers_are_stable_at_the_boundaries() {
 }
 
 #[test]
+fn money_has_explicit_half_cent_text_and_range_boundaries() {
+    for (euros, cents) in [(0.0, 0), (0.005, 1), (0.125, 13)] {
+        assert_eq!(Money::from_euros(euros).map(Money::cents), Ok(cents));
+    }
+    for euros in [-0.005, -0.125] {
+        assert_eq!(Money::from_euros(euros), Err(MoneyError::Negative));
+    }
+
+    assert_eq!(Money::from_cents(i64::MAX).map(Money::cents), Ok(i64::MAX));
+    assert_eq!(
+        "92233720368547758.07".parse::<Money>().map(Money::cents),
+        Ok(i64::MAX)
+    );
+    assert_eq!(
+        "92233720368547758.08".parse::<Money>(),
+        Err(MoneyError::OutOfRange)
+    );
+
+    assert_eq!(
+        "".parse::<Money>(),
+        Err(MoneyError::InvalidFormat("empty amount"))
+    );
+    for text in ["NaN", "inf", "-inf"] {
+        assert!(
+            matches!(
+                text.parse::<Money>(),
+                Err(MoneyError::InvalidFormat(
+                    "only digits, dots, and commas are allowed"
+                ))
+            ),
+            "{text}"
+        );
+    }
+    for text in ["1..2", "1,,2", "1.,2"] {
+        assert_eq!(
+            text.parse::<Money>(),
+            Err(MoneyError::InvalidFormat("duplicate separators")),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn money_deserialisation_rejects_non_finite_negative_and_overflowing_values() {
     for bad in [
         "NaN",
