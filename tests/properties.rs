@@ -199,19 +199,41 @@ proptest! {
         }
     }
 
-    /// Money survives a trip through cents and back, for every valid value.
+    /// Money survives a trip through cents and its canonical decimal form for
+    /// every valid value, including the full `i64` range.
     #[test]
-    fn cents_round_trip(cents in 0i64..100_000_000) {
-        prop_assert_eq!(Money::from_cents(cents).map(Money::cents), Ok(cents));
+    fn cents_round_trip(cents in 0i64..=i64::MAX) {
+        let money = Money::from_cents(cents).expect("nonnegative");
+        prop_assert_eq!(money.cents(), cents);
+        prop_assert_eq!(Money::parse(&money.to_string()), Ok(money));
     }
 
-    /// Net plus tax is the checked sum, in cents as in euro.
+    /// Net plus tax is the checked sum in cents, including overflow at the top
+    /// of the representable range.
     #[test]
-    fn totals_add_up(a in 0i64..100_000, b in 0i64..100_000) {
+    fn totals_add_up(a in 0i64..=i64::MAX, b in 0i64..=i64::MAX) {
         let net = Money::from_cents(a).expect("nonnegative");
         let vat = Money::from_cents(b).expect("nonnegative");
-        prop_assert_eq!(net.total(vat).map(Money::cents), Ok(a + b));
         prop_assert_eq!(net.checked_add(vat), net.total(vat));
+        if let Some(sum) = a.checked_add(b) {
+            prop_assert_eq!(net.total(vat).map(Money::cents), Ok(sum));
+        } else {
+            prop_assert_eq!(net.total(vat), Err(letterxpress::MoneyError::OutOfRange));
+        }
+    }
+
+    /// The decimal parser preserves ordering for canonical amounts across the
+    /// full nonnegative `i64` cent range.
+    #[test]
+    fn parsed_cents_are_monotonic(a in 0i64..=i64::MAX, b in 0i64..=i64::MAX) {
+        let (low, high) = if a <= b { (a, b) } else { (b, a) };
+        let low_text = format!("{}.{:02}", low / 100, low % 100);
+        let high_text = format!("{}.{:02}", high / 100, high % 100);
+        let low_money = Money::parse(&low_text).expect("canonical amount");
+        let high_money = Money::parse(&high_text).expect("canonical amount");
+        prop_assert_eq!(low_money.cents(), low);
+        prop_assert_eq!(high_money.cents(), high);
+        prop_assert!(low_money.cents() <= high_money.cents());
     }
 
     /// Arbitrary text reaching the money parser is rejected or accepted, never
