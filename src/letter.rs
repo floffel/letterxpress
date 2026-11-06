@@ -32,10 +32,9 @@
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use md5::{Digest, Md5};
 use serde_json::{json, Map, Value};
 
-use crate::{Color, Date, EmailOption, Error, PrintMode, Registered, Shipping};
+use crate::{md5_hex, Color, Date, EmailOption, Error, PrintMode, Registered, Shipping};
 
 /// Documented maximum: "Maximale Dateigröße darf 50 MB je PDF / Request nicht
 /// überschreiten" (p. 3 of the v3 documentation).
@@ -1717,13 +1716,7 @@ fn encode_pdf(field: &'static str, pdf: &[u8], budget: &mut usize) -> Result<Enc
 
 /// MD5 of the base64 text, hex-encoded — the documented `base64_file_checksum`.
 fn checksum_of(base64: &str) -> String {
-    let digest = Md5::digest(base64.as_bytes());
-    let mut hex = String::with_capacity(32);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    md5_hex(base64.as_bytes())
 }
 
 /// Character-count check (not byte count: the provider limits characters).
