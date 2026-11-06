@@ -34,7 +34,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde_json::{json, Map, Value};
 
-use crate::{md5_hex, Color, Date, EmailOption, Error, PrintMode, Registered, Shipping};
+use crate::{md5_hex, Color, Date, EmailOption, Error, Money, PrintMode, Registered, Shipping};
 
 /// Documented maximum: "Maximale Dateigröße darf 50 MB je PDF / Request nicht
 /// überschreiten" (p. 3 of the v3 documentation).
@@ -58,6 +58,9 @@ pub const MAX_IBAN_CHARS: usize = 34;
 pub const MAX_BIC_CHARS: usize = 11;
 /// Documented maximum for `bank_form.amount`.
 pub const MAX_BANK_AMOUNT_CHARS: usize = 12;
+/// Largest bank-form amount representable within [`MAX_BANK_AMOUNT_CHARS`]:
+/// nine whole-euro digits, a separator, and two fractional digits.
+const MAX_BANK_AMOUNT_CENTS: i64 = 99_999_999_999;
 /// Documented maximum for `bank_form.purpose_of_payment`.
 pub const MAX_PURPOSE_CHARS: usize = 27;
 
@@ -683,7 +686,9 @@ impl BankForm {
     ///
     /// [`Error::Validation`] for an empty or over-long field (payee and
     /// purpose 27 characters, IBAN 34, BIC 11, amount 12), an IBAN or BIC with
-    /// characters outside `A-Z0-9`, or an amount that is not a decimal.
+    /// characters outside `A-Z0-9`, or an amount that is not a plain decimal
+    /// no greater than `999999999.99`. Surrounding whitespace is removed from
+    /// every field before validation and serialisation.
     ///
     /// ```
     /// use letterxpress::BankForm;
@@ -698,56 +703,56 @@ impl BankForm {
         amount: impl Into<String>,
         purpose: impl Into<String>,
     ) -> Result<Self, Error> {
-        let payee = payee.into();
-        let iban = iban.into();
-        let bic = bic.into();
-        let amount = amount.into();
-        let purpose = purpose.into();
-
-        check_chars("letter.bank_form.payee", &payee, MAX_PAYEE_CHARS)?;
-        check_chars("letter.bank_form.iban", &iban, MAX_IBAN_CHARS)?;
-        check_chars("letter.bank_form.bic", &bic, MAX_BIC_CHARS)?;
-        check_chars("letter.bank_form.amount", &amount, MAX_BANK_AMOUNT_CHARS)?;
-        check_chars(
+        let payee = normalize_bank_field(
+            "letter.bank_form.payee",
+            payee.into().as_str(),
+            MAX_PAYEE_CHARS,
+        )?;
+        let iban = normalize_bank_field(
+            "letter.bank_form.iban",
+            iban.into().as_str(),
+            MAX_IBAN_CHARS,
+        )?;
+        let bic = normalize_bank_field("letter.bank_form.bic", bic.into().as_str(), MAX_BIC_CHARS)?;
+        let amount = normalize_bank_field(
+            "letter.bank_form.amount",
+            amount.into().as_str(),
+            MAX_BANK_AMOUNT_CHARS,
+        )?;
+        let purpose = normalize_bank_field(
             "letter.bank_form.purpose_of_payment",
-            &purpose,
+            purpose.into().as_str(),
             MAX_PURPOSE_CHARS,
         )?;
 
-        if payee.trim().is_empty() {
+        if payee.is_empty() {
             return Err(Error::invalid(
                 "letter.bank_form.payee",
                 "must not be empty",
             ));
         }
-        if purpose.trim().is_empty() {
+        if purpose.is_empty() {
             return Err(Error::invalid(
                 "letter.bank_form.purpose_of_payment",
                 "must not be empty",
             ));
         }
 
-        let iban_clean = iban.trim();
-        if !(15..=MAX_IBAN_CHARS).contains(&iban_clean.len())
-            || !iban_clean.chars().all(|c| c.is_ascii_alphanumeric())
+        if !(15..=MAX_IBAN_CHARS).contains(&iban.len())
+            || !iban.chars().all(|c| c.is_ascii_alphanumeric())
         {
             return Err(Error::invalid(
                 "letter.bank_form.iban",
                 "must be 15 to 34 characters, letters and digits only",
             ));
         }
-        if !matches!(bic.trim().len(), 8 | 11) || !bic.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if !matches!(bic.len(), 8 | 11) || !bic.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(Error::invalid(
                 "letter.bank_form.bic",
                 "must be 8 or 11 letters/digits",
             ));
         }
-        if !is_decimal_amount(amount.trim()) {
-            return Err(Error::invalid(
-                "letter.bank_form.amount",
-                "must be a decimal amount such as 81,00 or 81.00",
-            ));
-        }
+        validate_bank_amount(&amount)?;
 
         Ok(Self {
             included: false,
@@ -1829,20 +1834,27 @@ pub(crate) fn validate_email(field: &'static str, value: &str) -> Result<(), Err
     Ok(())
 }
 
-/// Accepts `81`, `81,00`, `81.00`.
-fn is_decimal_amount(value: &str) -> bool {
-    let mut seen_separator = false;
-    let mut digits = 0;
-    for character in value.chars() {
-        if character.is_ascii_digit() {
-            digits += 1;
-        } else if (character == ',' || character == '.') && !seen_separator {
-            seen_separator = true;
-        } else {
-            return false;
-        }
+fn normalize_bank_field(field: &'static str, value: &str, max: usize) -> Result<String, Error> {
+    let value = value.trim().to_owned();
+    check_chars(field, &value, max)?;
+    Ok(value)
+}
+
+/// Validates the same normalized string that [`BankForm`] serialises.
+fn validate_bank_amount(value: &str) -> Result<(), Error> {
+    let starts_with_digit = value.as_bytes().first().is_some_and(u8::is_ascii_digit);
+    let parsed = starts_with_digit
+        .then(|| Money::parse(value).ok())
+        .flatten()
+        .filter(|amount| amount.cents() <= MAX_BANK_AMOUNT_CENTS);
+
+    if parsed.is_none() {
+        return Err(Error::invalid(
+            "letter.bank_form.amount",
+            "must be a decimal amount from 0 to 999999999.99, such as 81,00 or 81.00",
+        ));
     }
-    digits > 0
+    Ok(())
 }
 
 impl Terms {
@@ -1907,15 +1919,54 @@ mod tests {
     }
 
     #[test]
-    fn decimal_amounts_accept_both_separators_and_nothing_else() {
-        assert!(is_decimal_amount("81"));
-        assert!(is_decimal_amount("81,00"));
-        assert!(is_decimal_amount("81.00"));
-        assert!(!is_decimal_amount(""));
-        assert!(!is_decimal_amount(","));
-        assert!(!is_decimal_amount("8,1,0"));
-        assert!(!is_decimal_amount("8 1"));
-        assert!(!is_decimal_amount("EUR 81"));
+    fn bank_amounts_use_shared_decimal_rules_and_the_provider_limit() {
+        for valid in ["0", "81", "81,00", "81.00", "999999999.99", "1.000,00"] {
+            assert!(validate_bank_amount(valid).is_ok(), "{valid:?}");
+        }
+        for invalid in [
+            "",
+            ",",
+            "81,",
+            "81.",
+            ".5",
+            ",81",
+            "8,1,0",
+            "8 1",
+            "EUR 81",
+            "1000000000",
+            "1000000000.00",
+        ] {
+            assert!(validate_bank_amount(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn generated_fields_validate_and_serialise_the_normalised_value() {
+        let form = BankForm::generated(
+            "  A&O Fischer GmbH  ",
+            " DE12500105170648489890 ",
+            " INGDDEFF ",
+            " 81,00 ",
+            " Rechnung 4711 ",
+        )
+        .expect("trimmed fields are valid");
+        let json = form.to_json();
+        assert_eq!(json["payee"], "A&O Fischer GmbH");
+        assert_eq!(json["iban"], "DE12500105170648489890");
+        assert_eq!(json["bic"], "INGDDEFF");
+        assert_eq!(json["amount"], "81,00");
+        assert_eq!(json["purpose_of_payment"], "Rechnung 4711");
+
+        let error =
+            BankForm::generated("A", "DE12500105170648489890", "INGDDEFF", "1000000000", "R")
+                .expect_err("the amount exceeds the provider range");
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "letter.bank_form.amount",
+                ..
+            }
+        ));
     }
 
     #[test]
