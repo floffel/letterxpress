@@ -8,7 +8,9 @@
 //! 2. Successful answers repeat the code in the body (`"status": 200`). When
 //!    both are present they agree; when only the body carries a 4xx/5xx code,
 //!    that code is honoured too. A body-level 429 is the same rate-limit
-//!    signal as an HTTP 429, including the `Retry-After` hint.
+//!    signal as an HTTP 429, including the `Retry-After` hint. Both sources
+//!    use one classifier, so a body-level 1xx/3xx or out-of-range code cannot
+//!    silently become a successful envelope.
 //!
 //! ```
 //! use letterxpress::transport::Response;
@@ -211,7 +213,7 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
         return Err(error);
     }
     // A body-level 4xx/5xx code is honoured when the HTTP status said 2xx.
-    if let Some(error) = body_error(body_status, message.as_deref(), &response) {
+    if let Some(error) = body_error(endpoint, body_status, message.as_deref(), &response) {
         return Err(error);
     }
 
@@ -253,72 +255,112 @@ fn http_error(
     response: &Response,
     body_fallback: impl FnOnce() -> String,
 ) -> Option<Error> {
-    if (200..300).contains(&status) {
+    if status_class(status) == StatusClass::Success {
         return None;
     }
     let text = message.map_or_else(body_fallback, str::to_owned);
+    Some(status_error(endpoint, status, &text, response))
+}
+
+/// Maps a body-level status when the HTTP status said 2xx, using the same
+/// classifier and `Retry-After` handling as the HTTP-status path.
+fn body_error(
+    endpoint: &'static str,
+    status: Option<u16>,
+    message: Option<&str>,
+    response: &Response,
+) -> Option<Error> {
+    let status = status?;
+    if status_class(status) == StatusClass::Success {
+        return None;
+    }
+    Some(status_error(
+        endpoint,
+        status,
+        message.unwrap_or_default(),
+        response,
+    ))
+}
+
+/// The only classification shared by HTTP and body-level status values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    Success,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    MethodNotAllowed,
+    RateLimited,
+    Upstream,
+    Rejected,
+    UnexpectedStatus,
+    UnexpectedShape,
+}
+
+/// Classifies one status value without regard to where it came from.
+fn status_class(status: u16) -> StatusClass {
     match status {
-        401 => Some(Error::Unauthorized {
+        200..=299 => StatusClass::Success,
+        401 => StatusClass::Unauthorized,
+        403 => StatusClass::Forbidden,
+        404 => StatusClass::NotFound,
+        405 => StatusClass::MethodNotAllowed,
+        429 => StatusClass::RateLimited,
+        500..=599 => StatusClass::Upstream,
+        400..=499 => StatusClass::Rejected,
+        // Redirects are not followed, because following one would send the
+        // credential to whatever host the redirect names.
+        100..=199 | 300..=399 => StatusClass::UnexpectedStatus,
+        _ => StatusClass::UnexpectedShape,
+    }
+}
+
+/// Builds the typed error for a non-success class. The text is bounded here as
+/// a final guard, independent of whether it came from the envelope or a raw
+/// body snippet.
+fn status_error(endpoint: &'static str, status: u16, text: &str, response: &Response) -> Error {
+    let text = cap_error_text(text);
+    match status_class(status) {
+        StatusClass::Success => {
+            // Both callers filter success first. Treat a future caller that
+            // forgets as a terminal classification rather than panicking.
+            Error::UnexpectedShape {
+                endpoint,
+                message: format!("unexpected response status {status}: {text}"),
+                source: None,
+            }
+        }
+        StatusClass::Unauthorized => Error::Unauthorized {
             message: if text.is_empty() {
                 "Unauthorized.".to_string()
             } else {
                 text
             },
-        }),
-        403 => Some(Error::Forbidden { message: text }),
-        404 => Some(Error::NotFound { message: text }),
-        405 => Some(Error::MethodNotAllowed { message: text }),
-        429 => Some(Error::RateLimited {
+        },
+        StatusClass::Forbidden => Error::Forbidden { message: text },
+        StatusClass::NotFound => Error::NotFound { message: text },
+        StatusClass::MethodNotAllowed => Error::MethodNotAllowed { message: text },
+        StatusClass::RateLimited => Error::RateLimited {
             retry_after: parse_retry_after(response),
-        }),
-        500..=599 => Some(Error::Upstream {
+        },
+        StatusClass::Upstream => Error::Upstream {
             status,
             message: text,
-        }),
-        400..=499 => Some(Error::Rejected {
+        },
+        StatusClass::Rejected => Error::Rejected {
             status,
             message: text,
-        }),
-        200..=299 => None,
-        // Redirects are not followed, because following one would send the
-        // credential to whatever host the redirect names. The caller knows
-        // whether the request was idempotent; this layer only reports the
-        // status class.
-        100..=199 | 300..=399 => Some(Error::UnexpectedStatus {
+        },
+        StatusClass::UnexpectedStatus => Error::UnexpectedStatus {
             status,
             endpoint,
             message: text,
-        }),
-        _ => Some(Error::UnexpectedShape {
+        },
+        StatusClass::UnexpectedShape => Error::UnexpectedShape {
             endpoint,
-            message: format!("unexpected HTTP status {status}: {text}"),
+            message: format!("unexpected response status {status}: {text}"),
             source: None,
-        }),
-    }
-}
-
-/// Maps a body-level status when the HTTP status said 2xx, using the same
-/// `Retry-After` header as the HTTP-status path.
-fn body_error(status: Option<u16>, message: Option<&str>, response: &Response) -> Option<Error> {
-    let status = status?;
-    let text = message.unwrap_or_default().to_string();
-    match status {
-        401 => Some(Error::Unauthorized { message: text }),
-        403 => Some(Error::Forbidden { message: text }),
-        404 => Some(Error::NotFound { message: text }),
-        405 => Some(Error::MethodNotAllowed { message: text }),
-        429 => Some(Error::RateLimited {
-            retry_after: parse_retry_after(response),
-        }),
-        500..=599 => Some(Error::Upstream {
-            status,
-            message: text,
-        }),
-        400..=499 => Some(Error::Rejected {
-            status,
-            message: text,
-        }),
-        _ => None,
+        },
     }
 }
 
@@ -363,15 +405,10 @@ fn extract_message(body: &Value) -> Option<String> {
         };
         let rendered = match value {
             Value::Null => continue,
-            Value::String(text) => text.clone(),
-            Value::Array(entries) => entries
-                .iter()
-                .map(render_scalar)
-                .collect::<Vec<_>>()
-                .join("; "),
+            Value::String(text) => cap_error_text(text),
+            Value::Array(entries) => render_error_entries(entries),
             other => render_scalar(other),
         };
-        let rendered = rendered.trim().to_string();
         if !rendered.is_empty() {
             return Some(rendered);
         }
@@ -379,14 +416,51 @@ fn extract_message(body: &Value) -> Option<String> {
     None
 }
 
+const MAX_ERROR_ENTRIES: usize = 16;
+
+/// Joins at most [`MAX_ERROR_ENTRIES`] entries and never builds more than the
+/// shared error-text budget. A provider can send arbitrarily many validation
+/// entries; only the useful prefix belongs in an error or a log line.
+fn render_error_entries(entries: &[Value]) -> String {
+    let mut rendered = String::new();
+    let mut truncated = entries.len() > MAX_ERROR_ENTRIES;
+    for entry in entries.iter().take(MAX_ERROR_ENTRIES) {
+        let entry = render_scalar(entry);
+        if entry.is_empty() {
+            continue;
+        }
+        if !rendered.is_empty() {
+            if rendered.chars().count() >= ERROR_TEXT_CHARS {
+                truncated = true;
+                break;
+            }
+            rendered.push_str("; ");
+        }
+        let remaining = ERROR_TEXT_CHARS.saturating_sub(rendered.chars().count());
+        let mut chars = entry.chars();
+        rendered.extend(chars.by_ref().take(remaining));
+        if chars.next().is_some() {
+            truncated = true;
+            break;
+        }
+    }
+    if truncated {
+        rendered.push('…');
+    }
+    rendered
+}
+
 /// A scalar or object rendered as one line of text.
 fn render_scalar(value: &Value) -> String {
     match value {
-        Value::String(text) => text.clone(),
+        Value::String(text) => cap_error_text(text),
         Value::Object(map) => map
             .get("message")
-            .map_or_else(|| value.to_string(), render_scalar),
-        other => other.to_string(),
+            .map_or_else(|| "[object]".to_string(), render_scalar),
+        // Error entries are diagnostics. Avoid serialising nested arrays or
+        // objects only to discard nearly all of the resulting text.
+        Value::Array(_) => "[array]".to_string(),
+        other => cap_error_text(&other.to_string()),
     }
 }
 
@@ -399,24 +473,36 @@ fn status_of(value: &Value) -> Option<u16> {
     }
 }
 
-const BODY_SNIPPET_CHARS: usize = 512;
-const BODY_SNIPPET_PREFIX_BYTES: usize = BODY_SNIPPET_CHARS * 4;
+const ERROR_TEXT_CHARS: usize = 512;
+const ERROR_TEXT_PREFIX_BYTES: usize = ERROR_TEXT_CHARS * 4;
 
 /// The first 512 characters of the raw body, for error messages when there is
-/// no envelope. Never more: a 50 MB HTML error page must not end up in a log
+/// no envelope. Never more: a large HTML error page must not end up in a log
 /// line. Only a prefix large enough to hold 512 four-byte UTF-8 characters is
-/// copied before the cap is applied.
+/// copied before the cap is applied. Leading whitespace is skipped within that
+/// prefix so a padded error page still contributes useful text.
 fn body_snippet(response: &Response) -> String {
     let body = response.body();
-    let prefix = &body[..body.len().min(BODY_SNIPPET_PREFIX_BYTES)];
+    let prefix = &body[..body.len().min(ERROR_TEXT_PREFIX_BYTES)];
     let text = String::from_utf8_lossy(prefix);
-    let trimmed = text.trim();
-    let mut chars = trimmed.chars();
-    let mut snippet: String = chars.by_ref().take(BODY_SNIPPET_CHARS).collect();
-    if chars.next().is_some() || body.len() > prefix.len() {
+    let mut snippet = cap_error_text(text.trim_start());
+    if body.len() > prefix.len() && !snippet.ends_with('…') {
         snippet.push('…');
     }
     snippet
+}
+
+/// Trims provider-controlled text and keeps at most 512 characters, adding an
+/// ellipsis when anything was discarded. This is the one budget used for raw
+/// body snippets and envelope messages alike.
+fn cap_error_text(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut chars = trimmed.chars();
+    let mut capped: String = chars.by_ref().take(ERROR_TEXT_CHARS).collect();
+    if chars.next().is_some() {
+        capped.push('…');
+    }
+    capped
 }
 
 /// `Retry-After` in whole seconds, clamped to
@@ -562,23 +648,23 @@ mod tests {
 
     #[test]
     fn body_snippet_stops_at_the_character_boundary() {
-        let just_inside = "a".repeat(BODY_SNIPPET_CHARS - 1);
+        let just_inside = "a".repeat(ERROR_TEXT_CHARS - 1);
         assert_eq!(snippet_for(just_inside.clone()), just_inside);
 
-        let at_limit = "a".repeat(BODY_SNIPPET_CHARS);
+        let at_limit = "a".repeat(ERROR_TEXT_CHARS);
         assert_eq!(snippet_for(at_limit.clone()), at_limit);
 
-        let over_limit = "a".repeat(BODY_SNIPPET_CHARS + 1);
+        let over_limit = "a".repeat(ERROR_TEXT_CHARS + 1);
         assert_eq!(
             snippet_for(over_limit),
-            format!("{}…", "a".repeat(BODY_SNIPPET_CHARS))
+            format!("{}…", "a".repeat(ERROR_TEXT_CHARS))
         );
     }
 
     #[test]
     fn body_snippet_holds_512_four_byte_characters() {
-        let at_limit = "😀".repeat(BODY_SNIPPET_CHARS);
-        assert_eq!(at_limit.len(), BODY_SNIPPET_PREFIX_BYTES);
+        let at_limit = "😀".repeat(ERROR_TEXT_CHARS);
+        assert_eq!(at_limit.len(), ERROR_TEXT_PREFIX_BYTES);
         assert_eq!(snippet_for(at_limit.clone()), at_limit);
 
         let over_limit = format!("{at_limit}😀");
@@ -587,13 +673,24 @@ mod tests {
 
     #[test]
     fn body_snippet_does_not_read_past_the_prefix_boundary() {
-        let mut just_inside = vec![b' '; BODY_SNIPPET_PREFIX_BYTES - 1];
+        let mut just_inside = vec![b' '; ERROR_TEXT_PREFIX_BYTES - 1];
         just_inside.push(b'x');
         assert_eq!(snippet_for(just_inside), "x");
 
-        let mut just_outside = vec![b' '; BODY_SNIPPET_PREFIX_BYTES];
+        let mut just_outside = vec![b' '; ERROR_TEXT_PREFIX_BYTES];
         just_outside.push(b'x');
         assert_eq!(snippet_for(just_outside), "…");
+    }
+
+    #[test]
+    fn body_snippet_skips_leading_whitespace_within_the_prefix() {
+        let mut padded = vec![b' '; ERROR_TEXT_PREFIX_BYTES];
+        padded.extend_from_slice(b"useful error");
+        assert_eq!(snippet_for(padded), "…");
+
+        let mut just_visible = vec![b' '; ERROR_TEXT_PREFIX_BYTES - 1];
+        just_visible.extend_from_slice(b"x");
+        assert_eq!(snippet_for(just_visible), "x");
     }
 
     #[test]
@@ -659,6 +756,46 @@ mod tests {
     }
 
     #[test]
+    fn body_level_non_success_codes_use_the_http_classifier() {
+        for status in [100, 199, 300, 399] {
+            let body = format!(r#"{{"status":{status},"message":"not successful"}}"#);
+            let error = envelope(&body).expect_err("must fail");
+            assert!(
+                matches!(
+                    &error,
+                    Error::UnexpectedStatus {
+                        status: actual,
+                        endpoint: "GET /v3/balance",
+                        message,
+                    } if *actual == status && message == "not successful"
+                ),
+                "status {status}: {error:?}"
+            );
+        }
+
+        for status in [0, 600, u16::MAX] {
+            let body = format!(r#"{{"status":{status},"message":"out of range"}}"#);
+            let error = envelope(&body).expect_err("must fail");
+            assert!(
+                matches!(
+                    &error,
+                    Error::UnexpectedShape {
+                        endpoint: "GET /v3/balance",
+                        message,
+                        source: None,
+                    } if message.contains(&status.to_string()) && message.contains("out of range")
+                ),
+                "status {status}: {error:?}"
+            );
+        }
+
+        for status in [200, 204, 299] {
+            let body = format!(r#"{{"status":{status},"data":{{}}}}"#);
+            assert!(envelope(&body).is_ok(), "status {status}");
+        }
+    }
+
+    #[test]
     fn messages_are_rendered_from_every_shape_the_api_uses() {
         let array =
             envelope(r#"{"status":200,"errors":["first","second"],"data":{}}"#).expect("ok");
@@ -678,6 +815,44 @@ mod tests {
 
         let none = envelope(r#"{"status":200,"data":{}}"#).expect("ok");
         assert_eq!(none.message(), None);
+    }
+
+    #[test]
+    fn provider_message_text_is_bounded_to_the_body_snippet_budget() {
+        let huge = "x".repeat(100_000);
+        let body = serde_json::json!({"status": 500, "message": huge});
+        let error = envelope(&body.to_string()).expect_err("must fail");
+        let Error::Upstream { message, .. } = error else {
+            panic!("unexpected error");
+        };
+        assert_eq!(message.chars().count(), ERROR_TEXT_CHARS + 1);
+        assert!(message.ends_with('…'));
+    }
+
+    #[test]
+    fn provider_error_arrays_cap_entries_and_joined_text() {
+        let entries: Vec<Value> = (0..10_000)
+            .map(|index| Value::String(format!("validation error {index}")))
+            .collect();
+        let body = serde_json::json!({"status": 400, "errors": entries});
+        let error = envelope(&body.to_string()).expect_err("must fail");
+        let Error::Rejected { message, .. } = error else {
+            panic!("unexpected error");
+        };
+        assert!(message.chars().count() <= ERROR_TEXT_CHARS + 1);
+        assert!(message.ends_with('…'));
+
+        let exactly_capped: Vec<Value> = (0..MAX_ERROR_ENTRIES)
+            .map(|_| Value::String("x".repeat(100)))
+            .collect();
+        let body = serde_json::json!({"status": 400, "errors": exactly_capped});
+        let error = envelope(&body.to_string()).expect_err("must fail");
+        let Error::Rejected { message, .. } = error else {
+            panic!("unexpected error");
+        };
+        assert!(message.chars().count() <= ERROR_TEXT_CHARS + 1);
+        assert!(message.ends_with('…'));
+        assert!(!message.contains("validation error 16"));
     }
 
     #[test]

@@ -98,7 +98,9 @@
 //!   credentials travel in every body, so a plaintext or ambiguous endpoint is
 //!   refused rather than sanitised.
 //! * Payload sizes are checked before allocation, encoded base64 is bounded,
-//!   and error bodies are truncated to 512 characters before they reach a log.
+//!   response bodies are streamed through a 1 MiB cap (70 MiB for invoice
+//!   documents), and provider error text is truncated to 512 characters before
+//!   it reaches a log.
 //! * There is no shared secret to compare in this protocol, so there is no
 //!   constant-time comparison to make: the API key is a bearer credential sent
 //!   in the body, not a signature the client verifies.

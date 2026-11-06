@@ -22,6 +22,21 @@ use url::Url;
 
 use crate::{Error, Result, TransportKind};
 
+/// Response bodies are buffered only up to this many bytes by the bundled HTTP
+/// transport. A larger declared or streamed body is a terminal protocol error.
+///
+/// The list and mutation endpoints return compact JSON envelopes. The invoice
+/// document endpoint is the sole exception because it embeds a PDF as base64;
+/// see [`MAX_INVOICE_RESPONSE_BODY_BYTES`].
+pub const MAX_RESPONSE_BODY_BYTES: u64 = 1_048_576;
+
+/// Response-body ceiling for `GET /v3/invoices/{id}`.
+///
+/// The documented input PDF ceiling is 50 MB. Base64 expands that to roughly
+/// 67 MB, so this leaves room for the JSON envelope while still bounding the
+/// only response that can legitimately be large.
+pub const MAX_INVOICE_RESPONSE_BODY_BYTES: u64 = 70 * 1_048_576;
+
 /// HTTP method. LetterXpress uses all four.
 ///
 /// ```
@@ -819,13 +834,71 @@ impl Transport for ReqwestTransport {
         let response = builder.send().await.map_err(describe_reqwest_error)?;
         let status = response.status().as_u16();
         let headers = collect_response_headers(response.headers());
-        let body = response
-            .bytes()
-            .await
-            .map_err(describe_reqwest_error)?
-            .to_vec();
+        let limit = response_body_limit(&request.url);
+        let body = read_response_body(response, limit).await?;
 
         Ok(Response::new(status, headers, body))
+    }
+}
+
+/// The invoice-document response is the only endpoint allowed to carry a PDF
+/// large enough to exceed the ordinary envelope budget.
+#[cfg(feature = "http")]
+fn response_body_limit(url: &str) -> u64 {
+    let Ok(parsed) = Url::parse(url) else {
+        return MAX_RESPONSE_BODY_BYTES;
+    };
+    let segments: Vec<_> = parsed
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() >= 2 && segments[segments.len() - 2] == "invoices" {
+        MAX_INVOICE_RESPONSE_BODY_BYTES
+    } else {
+        MAX_RESPONSE_BODY_BYTES
+    }
+}
+
+/// Reads a response body in chunks, rejecting the body before reading it when
+/// the declared length is too large and while streaming when the length is not
+/// known or is wrong. The bytes are copied once into the final `Vec`; unlike
+/// `Response::bytes().to_vec()`, there is no complete `Bytes` body held beside
+/// a second allocation.
+#[cfg(feature = "http")]
+async fn read_response_body(mut response: reqwest::Response, limit: u64) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return Err(response_body_too_large(limit));
+    }
+
+    let capacity = usize::try_from(response.content_length().unwrap_or_default().min(limit))
+        .unwrap_or_default();
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response.chunk().await.map_err(describe_reqwest_error)? {
+        let new_len = body
+            .len()
+            .checked_add(chunk.len())
+            .filter(|length| u64::try_from(*length).is_ok_and(|length| length <= limit));
+        let Some(new_len) = new_len else {
+            return Err(response_body_too_large(limit));
+        };
+        body.reserve_exact(new_len - body.len());
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "http")]
+fn response_body_too_large(limit: u64) -> Error {
+    Error::Transport {
+        kind: TransportKind::Protocol,
+        source: Box::new(std::io::Error::other(format!(
+            "response body exceeds the {limit}-byte limit"
+        ))),
     }
 }
 
@@ -991,6 +1064,180 @@ mod tests {
     #[test]
     fn reqwest_transport_new_builds_the_hardened_client() {
         assert!(ReqwestTransport::new().is_ok());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn response_body_limits_distinguish_invoice_documents() {
+        assert_eq!(
+            response_body_limit("https://api.letterxpress.de/v3/invoices/25402"),
+            MAX_INVOICE_RESPONSE_BODY_BYTES
+        );
+        for ordinary in [
+            "https://api.letterxpress.de/v3/invoices",
+            "https://api.letterxpress.de/v3/invoices/25402/items",
+            "https://api.letterxpress.de/v3/printjobs/1",
+            "https://api.letterxpress.de/v3/invoices/",
+        ] {
+            assert_eq!(
+                response_body_limit(ordinary),
+                MAX_RESPONSE_BODY_BYTES,
+                "{ordinary}"
+            );
+        }
+        assert_eq!(
+            response_body_limit("not an absolute URL"),
+            MAX_RESPONSE_BODY_BYTES
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn declared_response_bodies_over_the_limit_fail_before_reading() {
+        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let response = http_response_with_declared_length(
+            MAX_RESPONSE_BODY_BYTES + 1,
+            std::sync::Arc::clone(&polled),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let error = runtime
+            .block_on(read_response_body(response, MAX_RESPONSE_BODY_BYTES))
+            .expect_err("the declared length is over the cap");
+        assert_protocol_error(&error);
+        assert!(error
+            .to_string()
+            .contains(&MAX_RESPONSE_BODY_BYTES.to_string()));
+        assert!(
+            !polled.load(std::sync::atomic::Ordering::SeqCst),
+            "the body must be rejected before the first poll"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn response_body_reader_accepts_the_exact_limit_and_rejects_one_more_byte() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+
+        let at_limit = vec![b'x'; 8];
+        let response = http_response_with_length(8, at_limit.clone());
+        let body = runtime
+            .block_on(read_response_body(response, 8))
+            .expect("the exact limit is accepted");
+        assert_eq!(body, at_limit);
+
+        // Unknown length exercises the streaming path, and the chunk boundary
+        // is intentionally inside the first and second chunks on either side.
+        let response = http_response_with_chunks(vec![vec![b'x'; 7], vec![b'y'; 2]]);
+        let error = runtime
+            .block_on(read_response_body(response, 8))
+            .expect_err("one byte past the streamed limit must fail");
+        assert_protocol_error(&error);
+    }
+
+    #[cfg(feature = "http")]
+    fn http_response_with_length(length: u64, body: Vec<u8>) -> reqwest::Response {
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_LENGTH, length)
+            .body(reqwest::Body::from(body))
+            .expect("http response");
+        reqwest::Response::from(response)
+    }
+
+    #[cfg(feature = "http")]
+    fn http_response_with_declared_length(
+        length: u64,
+        polled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> reqwest::Response {
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(reqwest::Body::wrap(DeclaredBody { length, polled }))
+            .expect("http response");
+        reqwest::Response::from(response)
+    }
+
+    #[cfg(feature = "http")]
+    struct DeclaredBody {
+        length: u64,
+        polled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "http")]
+    impl http_body::Body for DeclaredBody {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+        {
+            self.polled.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::Ready(None)
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::with_exact(self.length)
+        }
+    }
+
+    #[cfg(feature = "http")]
+    fn http_response_with_chunks(chunks: Vec<Vec<u8>>) -> reqwest::Response {
+        let body = reqwest::Body::wrap(ChunkedBody {
+            chunks: chunks.into_iter(),
+        });
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(body)
+            .expect("http response");
+        reqwest::Response::from(response)
+    }
+
+    #[cfg(feature = "http")]
+    struct ChunkedBody {
+        chunks: std::vec::IntoIter<Vec<u8>>,
+    }
+
+    #[cfg(feature = "http")]
+    impl http_body::Body for ChunkedBody {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+        {
+            std::task::Poll::Ready(
+                self.chunks
+                    .next()
+                    .map(|chunk| Ok(http_body::Frame::data(bytes::Bytes::from(chunk)))),
+            )
+        }
+
+        fn size_hint(&self) -> http_body::SizeHint {
+            http_body::SizeHint::default()
+        }
+    }
+
+    #[cfg(feature = "http")]
+    fn assert_protocol_error(error: &Error) {
+        assert!(
+            matches!(
+                error,
+                Error::Transport {
+                    kind: TransportKind::Protocol,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        assert!(!error.is_retryable_for(true));
     }
 
     /// Runs the same steps as [`ReqwestTransport::new`] with a caller-chosen
