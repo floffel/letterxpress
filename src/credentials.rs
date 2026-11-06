@@ -42,7 +42,13 @@ const MAX_APIKEY_LEN: usize = 512;
 ///
 /// assert_eq!(Mode::Test.as_str(), "test");
 /// assert_eq!("LIVE".parse::<Mode>().unwrap(), Mode::Live);
-/// assert!("prod".parse::<Mode>().is_err());
+///
+/// let error = "live kunde@x.de s3cret".parse::<Mode>().unwrap_err();
+/// assert_eq!(
+///     error.to_string(),
+///     "invalid mode: unrecognised mode, 22 characters"
+/// );
+/// assert!(!error.to_string().contains("s3cret"));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -104,7 +110,7 @@ impl FromStr for Mode {
         } else {
             Err(Error::invalid(
                 "mode",
-                format!("expected \"test\" or \"live\", got {value:?}"),
+                format!("unrecognised mode, {} characters", value.chars().count()),
             ))
         }
     }
@@ -297,8 +303,22 @@ mod tests {
         assert!(Mode::Live.is_billable());
         assert_eq!(Mode::Test.to_string(), "test");
         assert_eq!(Mode::Live.to_string(), "live");
+        assert_eq!("test".parse::<Mode>().expect("test"), Mode::Test);
+        assert_eq!("live".parse::<Mode>().expect("live"), Mode::Live);
         assert_eq!(" Live ".parse::<Mode>().expect("live"), Mode::Live);
         assert!("prod".parse::<Mode>().is_err());
+    }
+
+    #[test]
+    fn mode_parse_error_redacts_the_untrusted_input_but_reports_its_length() {
+        let invalid = "live kunde@x.de s3cret";
+        let error = invalid.parse::<Mode>().expect_err("invalid mode");
+
+        assert!(matches!(error, Error::Validation { field: "mode", .. }));
+        let rendered = error.to_string();
+        assert_eq!(rendered, "invalid mode: unrecognised mode, 22 characters");
+        assert!(!rendered.contains("kunde@x.de"));
+        assert!(!rendered.contains("s3cret"));
     }
 
     #[test]
