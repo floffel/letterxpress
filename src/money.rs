@@ -5,6 +5,16 @@
 //! values to [`i64`] cents once, at the boundary, so accounting code never
 //! accumulates binary floating-point error.
 //!
+//! Quoted amounts may use either `.` or `,` as the decimal mark. A separator
+//! followed by one or two digits is a decimal mark; a separator followed by
+//! exactly three digits is a grouping separator. This makes `4,50` equal to
+//! `4.50`, `1,234` equal to `1234`, and `1.234,56` equal to `1234.56`. Both
+//! separator styles may appear together only when one is consistently used for
+//! groups of three and the other is the decimal mark. Mixed grouping styles,
+//! reused separators, trailing or duplicate separators, exponent notation, and
+//! a leading `+` are rejected rather than guessed. Amounts are nonnegative, so
+//! a nonzero leading `-` is reported as [`MoneyError::Negative`].
+//!
 //! ```
 //! use letterxpress::Money;
 //!
@@ -16,7 +26,9 @@
 //! ```
 
 use std::fmt;
+use std::str::FromStr;
 
+use rust_decimal::Decimal;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -28,6 +40,19 @@ use thiserror::Error;
 ///
 /// assert_eq!(Money::from_cents(-1), Err(MoneyError::Negative));
 /// assert_eq!(Money::from_euros(f64::NAN), Err(MoneyError::NotFinite));
+/// assert_eq!(
+///     "1,234,56".parse::<Money>(),
+///     Err(MoneyError::AmbiguousSeparators)
+/// );
+/// assert_eq!(
+///     "12,34,567".parse::<Money>(),
+///     Err(MoneyError::MalformedGrouping)
+/// );
+/// assert_eq!("1,2345".parse::<Money>(), Err(MoneyError::InvalidPrecision));
+/// assert_eq!(
+///     "4.".parse::<Money>(),
+///     Err(MoneyError::InvalidFormat("trailing separator"))
+/// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -41,6 +66,21 @@ pub enum MoneyError {
     /// The amount cannot be represented as a nonnegative [`i64`] cent value.
     #[error("money amount is out of range for i64 cents")]
     OutOfRange,
+    /// The amount has a shape that is not a plain decimal.
+    ///
+    /// The static detail names the rejected shape, such as an exponent,
+    /// trailing separator, or duplicate separator.
+    #[error("invalid money format: {0}")]
+    InvalidFormat(&'static str),
+    /// Grouping and decimal-separator roles are mixed or assigned twice.
+    #[error("money amount uses ambiguous or mixed separators")]
+    AmbiguousSeparators,
+    /// The digits between grouping separators are not groups of three.
+    #[error("money grouping separators are not consistent groups of three")]
+    MalformedGrouping,
+    /// The fractional part is longer than two digits.
+    #[error("money amount has more than two decimal places")]
+    InvalidPrecision,
 }
 
 /// A nonnegative monetary amount in euro cents.
@@ -228,6 +268,224 @@ impl Money {
     pub const fn is_zero(self) -> bool {
         self.cents == 0
     }
+
+    /// Parses a nonnegative euro amount using the separator rules documented
+    /// on [`Money`].
+    ///
+    /// Leading and trailing whitespace is ignored. A leading `-` is parsed so
+    /// that a nonzero negative amount is reported as [`MoneyError::Negative`];
+    /// negative zero is zero. A leading `+`, exponent notation, underscores,
+    /// and non-ASCII digits are rejected. Every rejection is terminal: the
+    /// same text always produces the same error, so retrying it is pointless.
+    ///
+    /// # Errors
+    ///
+    /// [`MoneyError::InvalidFormat`] for a non-plain-decimal shape,
+    /// [`MoneyError::InvalidPrecision`] for more than two decimal places,
+    /// [`MoneyError::AmbiguousSeparators`] when separator roles are mixed,
+    /// [`MoneyError::MalformedGrouping`] when groups are not 1-3 digits
+    /// followed by groups of exactly three, [`MoneyError::Negative`] for a
+    /// nonzero negative amount, and [`MoneyError::OutOfRange`] when the amount
+    /// does not fit in [`i64`] cents.
+    ///
+    /// ```
+    /// use letterxpress::{Money, MoneyError};
+    ///
+    /// let us: Money = "1,234.56".parse()?;
+    /// let german: Money = "1.234,56".parse()?;
+    /// assert_eq!(us.cents(), 123_456);
+    /// assert_eq!(german.cents(), 123_456);
+    /// assert_eq!("4,50".parse::<Money>()?.cents(), 450);
+    /// assert_eq!("1,234".parse::<Money>()?.cents(), 123_400);
+    /// assert_eq!(
+    ///     "1,234,56".parse::<Money>(),
+    ///     Err(MoneyError::AmbiguousSeparators)
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn parse(text: &str) -> Result<Self, MoneyError> {
+        let normalized = normalize_amount(text)?;
+        let amount = Decimal::from_str(&normalized).map_err(|_| MoneyError::OutOfRange)?;
+
+        if amount.is_sign_negative() {
+            if amount.is_zero() {
+                return Ok(Self::ZERO);
+            }
+            return Err(MoneyError::Negative);
+        }
+
+        let max = Decimal::new(i64::MAX, 2);
+        if amount > max {
+            return Err(MoneyError::OutOfRange);
+        }
+
+        let cents = amount * Decimal::ONE_HUNDRED;
+        let cents = i64::try_from(cents).map_err(|_| MoneyError::OutOfRange)?;
+        Self::from_cents(cents)
+    }
+}
+
+impl FromStr for Money {
+    type Err = MoneyError;
+
+    /// Parses an amount with [`Money::parse`].
+    ///
+    /// ```
+    /// let amount: letterxpress::Money = "1.234,56".parse()?;
+    /// assert_eq!(amount.cents(), 123_456);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// The longest text that can still describe an in-range amount after grouping
+/// separators and a two-digit fraction. Rejecting longer input before building
+/// the normalized string keeps hostile payloads from driving allocations.
+const MAX_AMOUNT_TEXT_BYTES: usize = 64;
+
+fn normalize_amount(value: &str) -> Result<String, MoneyError> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err(MoneyError::InvalidFormat("empty amount"));
+    }
+    if text.len() > MAX_AMOUNT_TEXT_BYTES {
+        return Err(MoneyError::OutOfRange);
+    }
+
+    let (negative, unsigned) = if let Some(unsigned) = text.strip_prefix('-') {
+        (true, unsigned)
+    } else if let Some(_unsigned) = text.strip_prefix('+') {
+        return Err(MoneyError::InvalidFormat("leading plus sign"));
+    } else {
+        (false, text)
+    };
+    if unsigned.is_empty() {
+        return Err(MoneyError::InvalidFormat("missing digits"));
+    }
+
+    let bytes = unsigned.as_bytes();
+    if bytes
+        .iter()
+        .any(|byte| !is_digit(*byte) && !is_separator(*byte))
+    {
+        return Err(MoneyError::InvalidFormat(
+            "only digits, dots, and commas are allowed",
+        ));
+    }
+
+    let Some(last_separator) = bytes.iter().rposition(|byte| is_separator(*byte)) else {
+        return finish_normalization(negative, unsigned, None);
+    };
+    let suffix_len = bytes.len() - last_separator - 1;
+
+    if suffix_len == 0 {
+        return Err(MoneyError::InvalidFormat("trailing separator"));
+    }
+    if bytes
+        .windows(2)
+        .any(|pair| is_separator(pair[0]) && is_separator(pair[1]))
+    {
+        return Err(MoneyError::InvalidFormat("duplicate separators"));
+    }
+
+    let decimal_separator = match suffix_len {
+        1 | 2 => Some(bytes[last_separator]),
+        3 => None,
+        _ => return Err(MoneyError::InvalidPrecision),
+    };
+
+    let integer_end = if decimal_separator.is_some() {
+        last_separator
+    } else {
+        bytes.len()
+    };
+    let integer = strip_grouping(&unsigned[..integer_end], decimal_separator)?;
+    let fraction = decimal_separator.map(|_| &unsigned[last_separator + 1..]);
+    finish_normalization(negative, &integer, fraction)
+}
+
+fn finish_normalization(
+    negative: bool,
+    integer: &str,
+    fraction: Option<&str>,
+) -> Result<String, MoneyError> {
+    if integer.is_empty() && fraction.is_none() {
+        return Err(MoneyError::InvalidFormat("missing digits"));
+    }
+
+    let mut normalized = String::with_capacity(
+        usize::from(negative) + integer.len().max(1) + fraction.map_or(0, |part| part.len() + 1),
+    );
+    if negative {
+        normalized.push('-');
+    }
+    if integer.is_empty() {
+        normalized.push('0');
+    } else {
+        normalized.push_str(integer);
+    }
+    if let Some(fraction) = fraction {
+        normalized.push('.');
+        normalized.push_str(fraction);
+    }
+    Ok(normalized)
+}
+
+fn strip_grouping(integer: &str, decimal_separator: Option<u8>) -> Result<String, MoneyError> {
+    let bytes = integer.as_bytes();
+    let mut grouping_separator = None;
+    for &byte in bytes {
+        if !is_separator(byte) {
+            continue;
+        }
+        if decimal_separator == Some(byte) || grouping_separator.is_some_and(|seen| seen != byte) {
+            return Err(MoneyError::AmbiguousSeparators);
+        }
+        grouping_separator = Some(byte);
+    }
+
+    let Some(separator) = grouping_separator else {
+        return Ok(integer.to_owned());
+    };
+
+    let mut groups = integer.split(char::from(separator));
+    let Some(first) = groups.next() else {
+        return Err(MoneyError::MalformedGrouping);
+    };
+    if !is_group(first, false) {
+        return Err(MoneyError::MalformedGrouping);
+    }
+    if groups.any(|group| !is_group(group, true)) {
+        return Err(MoneyError::MalformedGrouping);
+    }
+
+    let mut digits = String::with_capacity(integer.len());
+    for &byte in bytes {
+        if byte != separator {
+            digits.push(char::from(byte));
+        }
+    }
+    Ok(digits)
+}
+
+fn is_group(group: &str, must_be_three: bool) -> bool {
+    let length = group.len();
+    let length_ok = if must_be_three {
+        length == 3
+    } else {
+        (1..=3).contains(&length)
+    };
+    length_ok && group.bytes().all(is_digit)
+}
+
+const fn is_digit(byte: u8) -> bool {
+    byte.is_ascii_digit()
+}
+
+const fn is_separator(byte: u8) -> bool {
+    matches!(byte, b'.' | b',')
 }
 
 impl fmt::Display for Money {
@@ -261,7 +519,7 @@ impl Visitor<'_> for MoneyVisitor {
     type Value = Money;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a nonnegative euro amount as a number or a decimal string")
+        f.write_str("a nonnegative euro amount as a number or a grouped decimal string")
     }
 
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
@@ -288,14 +546,7 @@ impl Visitor<'_> for MoneyVisitor {
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        // Invoices and transaction exports are sometimes quoted; a German
-        // decimal comma is tolerated because the provider's CSV uses `;` as
-        // the separator and `,` as the decimal mark.
-        let cleaned = value.trim().replace(',', ".");
-        cleaned
-            .parse::<f64>()
-            .map_err(|_| E::custom(format!("not a euro amount: {value:?}")))
-            .and_then(Self::from_euros)
+        Money::parse(value).map_err(E::custom)
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -308,6 +559,16 @@ impl Visitor<'_> for MoneyVisitor {
 }
 
 impl<'de> Deserialize<'de> for Money {
+    /// Numbers and null keep their existing scalar meaning; strings follow the
+    /// documented [`Money::parse`] normalization rules.
+    ///
+    /// ```
+    /// let us: letterxpress::Money = serde_json::from_str(r#""1,234.56""#)?;
+    /// let german: letterxpress::Money = serde_json::from_str(r#""1.234,56""#)?;
+    /// assert_eq!(us.cents(), 123_456);
+    /// assert_eq!(german.cents(), 123_456);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_any(MoneyVisitor)
     }
@@ -367,6 +628,109 @@ mod tests {
         Ok(())
     }
 
+    fn cents_from(text: &str) -> Result<i64, MoneyError> {
+        Money::parse(text).map(Money::cents)
+    }
+
+    #[test]
+    fn string_grouping_is_not_mistaken_for_decimal_places() {
+        // The old `replace(',', ".")` produced 123 cents for the first value
+        // and a parse error for the second.
+        assert_eq!(cents_from("1,234"), Ok(123_400));
+        assert_eq!(cents_from("1.234,56"), Ok(123_456));
+        assert_eq!(cents_from("1,234.56"), Ok(123_456));
+        assert_eq!(cents_from("1.234"), Ok(123_400));
+    }
+
+    #[test]
+    fn documented_decimal_and_grouping_shapes_are_accepted() {
+        for (text, cents) in [
+            ("0", 0),
+            ("0.67", 67),
+            ("4,50", 450),
+            (" 4,50 ", 450),
+            (".5", 50),
+            (",25", 25),
+            ("1,234,567.89", 123_456_789),
+            ("1.234.567,89", 123_456_789),
+            ("12,345.67", 1_234_567),
+            ("123.456,78", 12_345_678),
+            ("-0", 0),
+            ("-0.00", 0),
+        ] {
+            assert_eq!(cents_from(text), Ok(cents), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn separator_boundaries_are_explicit() {
+        assert_eq!(cents_from("1.99"), Ok(199));
+        assert_eq!(cents_from("1,999"), Ok(199_900));
+        assert_eq!(cents_from("1,9999"), Err(MoneyError::InvalidPrecision));
+        assert_eq!(
+            cents_from("1234,567.89"),
+            Err(MoneyError::MalformedGrouping)
+        );
+        assert_eq!(
+            cents_from("12,34,567.89"),
+            Err(MoneyError::MalformedGrouping)
+        );
+    }
+
+    #[test]
+    fn mixed_or_reused_separator_roles_are_rejected() {
+        for text in ["1,234,56", "1.234.56", "1,234.567", "1.234,567"] {
+            assert_eq!(
+                cents_from(text),
+                Err(MoneyError::AmbiguousSeparators),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_signs_separators_and_exponents_are_rejected() {
+        for text in ["", "   ", "+4.50", "--1", "1-", "1e2", "1E2", "1_000"] {
+            assert!(
+                matches!(cents_from(text), Err(MoneyError::InvalidFormat(_))),
+                "{text:?}"
+            );
+        }
+        for text in ["4.", "4,", "1,234."] {
+            assert_eq!(
+                cents_from(text),
+                Err(MoneyError::InvalidFormat("trailing separator")),
+                "{text:?}"
+            );
+        }
+        for text in ["1..2", "1,,234", "1.,234"] {
+            assert_eq!(
+                cents_from(text),
+                Err(MoneyError::InvalidFormat("duplicate separators")),
+                "{text:?}"
+            );
+        }
+        assert_eq!(cents_from("-1.234,56"), Err(MoneyError::Negative));
+    }
+
+    #[test]
+    fn cent_range_boundaries_are_exact() {
+        assert_eq!(cents_from("92,233,720,368,547,758.07"), Ok(i64::MAX));
+        assert_eq!(cents_from("92233720368547758.07"), Ok(i64::MAX));
+        assert_eq!(
+            cents_from("92,233,720,368,547,758.08"),
+            Err(MoneyError::OutOfRange)
+        );
+        assert_eq!(
+            cents_from("92233720368547758.08"),
+            Err(MoneyError::OutOfRange)
+        );
+        assert_eq!(
+            cents_from(&format!("0{}", "0".repeat(MAX_AMOUNT_TEXT_BYTES))),
+            Err(MoneyError::OutOfRange)
+        );
+    }
+
     #[test]
     fn the_money_visitor_accepts_documented_scalars_and_refuses_bad_ones() {
         assert_eq!(
@@ -390,13 +754,15 @@ mod tests {
                 .cents(),
             400
         );
-        assert_eq!(
-            MoneyVisitor
-                .visit_str::<serde_json::Error>(" 4,50 ")
-                .expect("decimal comma")
-                .cents(),
-            450
-        );
+        for (text, cents) in [(" 4,50 ", 450), ("1,234", 123_400), ("1.234,56", 123_456)] {
+            assert_eq!(
+                MoneyVisitor
+                    .visit_str::<serde_json::Error>(text)
+                    .expect("decimal string")
+                    .cents(),
+                cents
+            );
+        }
         assert_eq!(
             MoneyVisitor
                 .visit_unit::<serde_json::Error>()
@@ -412,7 +778,17 @@ mod tests {
             0
         );
 
-        for bad in ["NaN", "inf", "-inf", "1e400", "-1", "9223372036854775808"] {
+        for bad in [
+            "NaN",
+            "inf",
+            "-inf",
+            "+4.5",
+            "4.5e2",
+            "4.5.",
+            "-1",
+            "1,234,56",
+            "9223372036854775808",
+        ] {
             assert!(
                 MoneyVisitor.visit_str::<serde_json::Error>(bad).is_err(),
                 "{bad}"
