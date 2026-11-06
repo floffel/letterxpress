@@ -13,7 +13,8 @@ bank-transfer forms — and that is what this crate types.
 
 - 16 of 16 documented endpoints
 - validation before the wire (PDF size/magic, `notice` length, bank-form field
-  limits, national-only registered mail, future dispatch dates)
+  limits and control characters, national-only registered mail, future dispatch
+  dates)
 - permissive decoding (unknown fields ignored, unknown enums carried, numbers
   or strings, `snake_case` or `camelCase`; the one exception is a flag — `c4`,
   `bank_form` — whose unreadable spelling fails closed instead of defaulting to

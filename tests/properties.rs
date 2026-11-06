@@ -14,7 +14,7 @@ use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
     AmbiguousKind, BankForm, Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode,
     Money, PrintMode, Registered, Shipping, TransportKind, MAX_BANK_AMOUNT_CHARS, MAX_NOTICE_CHARS,
-    MAX_RETRY_AFTER,
+    MAX_PURPOSE_CHARS, MAX_RETRY_AFTER,
 };
 use proptest::prelude::*;
 
@@ -275,6 +275,37 @@ proptest! {
             prop_assert!(amount.chars().count() <= MAX_BANK_AMOUNT_CHARS);
             let parsed = Money::parse(&amount).expect("accepted bank amount parses");
             prop_assert!(parsed.cents() <= 99_999_999_999);
+        }
+    }
+
+    /// A second payment-reference line accepts exactly the non-empty,
+    /// bounded, control-free text that survives bank-field normalization.
+    #[test]
+    fn purpose2_validation_matches_the_bank_field_rule(
+        chars in proptest::collection::vec(any::<char>(), 0..=28)
+    ) {
+        let raw: String = chars.into_iter().collect();
+        let normalized = raw.trim().to_owned();
+        let acceptable = !normalized.is_empty()
+            && normalized.chars().count() <= MAX_PURPOSE_CHARS
+            && !raw.chars().any(char::is_control);
+        let form = BankForm::generated(
+            "A",
+            "DE12500105170648489890",
+            "INGDDEFFXXX",
+            "81,00",
+            "R",
+        )
+        .expect("valid generated form");
+        let result = form.with_purpose2(raw);
+
+        prop_assert_eq!(result.is_ok(), acceptable);
+        if let Ok(form) = result {
+            let json = form.to_json();
+            prop_assert_eq!(
+                json["purpose_of_payment2"].as_str(),
+                Some(normalized.as_str())
+            );
         }
     }
 
