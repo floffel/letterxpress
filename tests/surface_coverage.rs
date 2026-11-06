@@ -20,6 +20,7 @@ use letterxpress::{
     TransportKind,
 };
 use serde_json::json;
+use strum::IntoEnumIterator;
 
 // ---------------------------------------------------------------------------
 // Wire vocabularies
@@ -148,6 +149,22 @@ fn request_side_filters_are_closed_and_parseable() {
         );
     }
     assert!("cheque".parse::<JournalType>().is_err());
+}
+
+#[test]
+fn request_side_filter_lists_contain_every_variant() {
+    assert_eq!(
+        JobFilter::iter().collect::<Vec<_>>(),
+        JobFilter::ALL.to_vec()
+    );
+    assert_eq!(
+        TransactionFilter::iter().collect::<Vec<_>>(),
+        TransactionFilter::ALL.to_vec()
+    );
+    assert_eq!(
+        JournalType::iter().collect::<Vec<_>>(),
+        JournalType::ALL.to_vec()
+    );
 }
 
 // ---------------------------------------------------------------------------
