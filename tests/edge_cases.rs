@@ -1839,6 +1839,82 @@ fn money_deserialisation_rejects_non_finite_negative_and_overflowing_values() {
 }
 
 #[test]
+fn money_deserialisation_reads_grouping_as_grouping() {
+    // The old comma-to-dot rewrite read the first as 1.234 EUR (123 cents)
+    // and rejected the second outright.
+    let us: Money = serde_json::from_str(r#""1,234""#).expect("US grouping");
+    assert_eq!(us.cents(), 123_400);
+
+    let german: Money = serde_json::from_str(r#""1.234,56""#).expect("German grouping");
+    assert_eq!(german.cents(), 123_456);
+
+    for (text, cents) in [
+        ("4,50", 450),
+        ("1,234.56", 123_456),
+        ("1.234,56", 123_456),
+        ("1,234,567.89", 123_456_789),
+        ("1.234.567,89", 123_456_789),
+    ] {
+        let money: Money = serde_json::from_str(&format!("\"{text}\""))
+            .unwrap_or_else(|error| panic!("{text:?}: {error}"));
+        assert_eq!(money.cents(), cents, "{text:?}");
+    }
+}
+
+#[test]
+fn money_string_parser_reports_typed_terminal_errors() {
+    assert_eq!(
+        "1,234".parse::<Money>(),
+        Ok(Money::from_cents(123_400).expect("valid"))
+    );
+    assert_eq!(
+        "1.234,56".parse::<Money>(),
+        Ok(Money::from_cents(123_456).expect("valid"))
+    );
+    assert_eq!(
+        "+4.5".parse::<Money>(),
+        Err(MoneyError::InvalidFormat("leading plus sign"))
+    );
+    assert_eq!(
+        "4.5e2".parse::<Money>(),
+        Err(MoneyError::InvalidFormat(
+            "only digits, dots, and commas are allowed"
+        ))
+    );
+    assert_eq!(
+        "4.5.".parse::<Money>(),
+        Err(MoneyError::InvalidFormat("trailing separator"))
+    );
+    assert_eq!("1,2345".parse::<Money>(), Err(MoneyError::InvalidPrecision));
+    assert_eq!(
+        "1,234,56".parse::<Money>(),
+        Err(MoneyError::AmbiguousSeparators)
+    );
+    assert_eq!(
+        "12,34,567".parse::<Money>(),
+        Err(MoneyError::MalformedGrouping)
+    );
+    assert_eq!("-1".parse::<Money>(), Err(MoneyError::Negative));
+}
+
+#[test]
+fn money_string_parser_has_exact_separator_precision_and_range_boundaries() {
+    assert_eq!("1.23".parse::<Money>().map(Money::cents), Ok(123));
+    assert_eq!("1.2345".parse::<Money>(), Err(MoneyError::InvalidPrecision));
+
+    assert_eq!(
+        "92,233,720,368,547,758.07"
+            .parse::<Money>()
+            .map(Money::cents),
+        Ok(i64::MAX)
+    );
+    assert_eq!(
+        "92,233,720,368,547,758.08".parse::<Money>(),
+        Err(MoneyError::OutOfRange)
+    );
+}
+
+#[test]
 fn money_deserialisation_keeps_unknown_enclosing_fields_permissive() {
     let balance: letterxpress::Balance = serde_json::from_str(
         r#"{"balance":"54.89","currency":"EUR","future_field":{"nested":true}}"#,

@@ -205,6 +205,34 @@ proptest! {
         prop_assert_eq!(net.checked_add(vat), net.total(vat));
     }
 
+    /// Arbitrary text reaching the money parser is rejected or accepted, never
+    /// a panic, and a successfully parsed amount round-trips through its
+    /// canonical decimal form.
+    #[test]
+    fn money_text_parsing_never_panics(raw in "\\PC{0,100}") {
+        if let Ok(money) = Money::parse(&raw) {
+            prop_assert_eq!(Money::parse(&money.to_string()), Ok(money));
+        }
+    }
+
+    /// US and German grouping are presentation only: for every amount and cent
+    /// value around the i64 boundary, both grouped forms resolve exactly like
+    /// the ungrouped form.
+    #[test]
+    fn grouped_money_agrees_with_the_ungrouped_value(
+        euros in 0u64..=92_233_720_368_547_758,
+        cents in 0u8..100,
+    ) {
+        let whole = euros.to_string();
+        let ungrouped = format!("{whole}.{cents:02}");
+        let us = format!("{}.{cents:02}", group_digits(&whole, ','));
+        let german = format!("{},{cents:02}", group_digits(&whole, '.'));
+
+        let expected = Money::parse(&ungrouped);
+        prop_assert_eq!(Money::parse(&us), expected, "US: {}", us);
+        prop_assert_eq!(Money::parse(&german), expected, "German: {}", german);
+    }
+
     /// Parsing a status and re-parsing its wire form is idempotent — including
     /// for values this crate does not model.
     #[test]
@@ -732,6 +760,18 @@ proptest! {
             }
         }
     }
+}
+
+fn group_digits(digits: &str, separator: char) -> String {
+    let first_group = digits.len() % 3;
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && index % 3 == first_group {
+            grouped.push(separator);
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 fn is_valid_credential_token(value: &str, max: usize) -> bool {

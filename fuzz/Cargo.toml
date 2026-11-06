@@ -36,4 +36,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "money_parse"
+path = "fuzz_targets/money_parse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
