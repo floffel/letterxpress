@@ -1,8 +1,10 @@
 //! A calendar date in the provider's `yyyy-mm-dd` format.
 //!
-//! The crate does not pull in a date library for two fields. [`Date`] validates
-//! the calendar (including leap years), orders chronologically and formats
-//! exactly as the provider documents.
+//! [`Date`] is a thin wrapper around [`jiff::civil::Date`], restricted to the
+//! provider's `1970..=9999` range. The maintained library owns the proleptic
+//! Gregorian calendar, leap years, month lengths, chronological ordering and
+//! ISO rendering; this wrapper keeps the strict `yyyy-mm-dd` wire shape and
+//! maps failures to [`Error`].
 //!
 //! ```
 //! use letterxpress::Date;
@@ -14,11 +16,15 @@
 //! # Ok::<(), letterxpress::Error>(())
 //! ```
 
-use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
+use jiff::civil::Date as CivilDate;
+
 use crate::Error;
+
+const UNIX_EPOCH: CivilDate = CivilDate::constant(1970, 1, 1);
+const SECONDS_PER_DAY: i64 = 86_400;
 
 /// A validated calendar date, used for `dispatch_date` and journal ranges.
 ///
@@ -30,12 +36,8 @@ use crate::Error;
 /// assert!(Date::new(2026, 2, 29).is_err());
 /// # Ok::<(), letterxpress::Error>(())
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Date {
-    year: u16,
-    month: u8,
-    day: u8,
-}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Date(CivilDate);
 
 impl Date {
     /// Builds a date, validating the calendar.
@@ -53,20 +55,30 @@ impl Date {
     /// assert!(Date::new(1969, 1, 1).is_err());
     /// ```
     pub fn new(year: u16, month: u8, day: u8) -> Result<Self, Error> {
+        let Ok(year) = i16::try_from(year) else {
+            return Err(year_error());
+        };
         if !(1970..=9999).contains(&year) {
-            return Err(Error::invalid("date", "year must be between 1970 and 9999"));
+            return Err(year_error());
         }
+        let Ok(month) = i8::try_from(month) else {
+            return Err(month_error());
+        };
         if !(1..=12).contains(&month) {
-            return Err(Error::invalid("date", "month must be between 1 and 12"));
+            return Err(month_error());
         }
-        let max_day = days_in_month(year, month);
-        if day == 0 || day > max_day {
-            return Err(Error::invalid(
-                "date",
-                format!("day must be between 1 and {max_day} for {year:04}-{month:02}"),
-            ));
+        let first_of_month = CivilDate::new(year, month, 1)
+            .map_err(|error| Error::invalid("date", error.to_string()))?;
+        let max_day = first_of_month.days_in_month();
+        let Ok(day) = i8::try_from(day) else {
+            return Err(day_error(year, month, max_day));
+        };
+        if !(1..=max_day).contains(&day) {
+            return Err(day_error(year, month, max_day));
         }
-        Ok(Self { year, month, day })
+        CivilDate::new(year, month, day)
+            .map(Self)
+            .map_err(|error| Error::invalid("date", error.to_string()))
     }
 
     /// Parses `yyyy-mm-dd`.
@@ -84,6 +96,9 @@ impl Date {
     /// # Ok::<(), letterxpress::Error>(())
     /// ```
     pub fn parse(text: &str) -> Result<Self, Error> {
+        // jiff also accepts a date embedded in an ISO date-time. The provider
+        // does not, so enforce its fixed-width wire shape before validating the
+        // calendar through `Date::new`.
         let bytes = text.as_bytes();
         let shaped = bytes.len() == 10
             && bytes[4] == b'-'
@@ -114,7 +129,7 @@ impl Date {
     /// ```
     #[must_use]
     pub fn year(self) -> u16 {
-        self.year
+        self.0.year().unsigned_abs()
     }
 
     /// The month, `1`-based.
@@ -124,7 +139,7 @@ impl Date {
     /// ```
     #[must_use]
     pub fn month(self) -> u8 {
-        self.month
+        self.0.month().unsigned_abs()
     }
 
     /// The day of the month.
@@ -134,7 +149,7 @@ impl Date {
     /// ```
     #[must_use]
     pub fn day(self) -> u8 {
-        self.day
+        self.0.day().unsigned_abs()
     }
 
     /// Whether this date falls strictly after `other`.
@@ -163,17 +178,23 @@ impl Date {
     /// ```
     #[must_use]
     pub fn days_since_epoch(self) -> i64 {
-        // Days from civil (Howard Hinnant's algorithm) for 1970-01-01 through
-        // 9999-12-31. The year and era are non-negative throughout this range.
-        let year = i64::from(self.year) - i64::from(self.month <= 2);
-        let era = year / 400;
-        let year_of_era = year - era * 400;
-        let month = i64::from(self.month);
-        let day = i64::from(self.day);
-        let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-        era * 146_097 + day_of_era - 719_468
+        self.0.duration_since(UNIX_EPOCH).as_secs() / SECONDS_PER_DAY
     }
+}
+
+fn year_error() -> Error {
+    Error::invalid("date", "year must be between 1970 and 9999")
+}
+
+fn month_error() -> Error {
+    Error::invalid("date", "month must be between 1 and 12")
+}
+
+fn day_error(year: i16, month: i8, max_day: i8) -> Error {
+    Error::invalid(
+        "date",
+        format!("day must be between 1 and {max_day} for {year:04}-{month:02}"),
+    )
 }
 
 const DATE_ERROR_PREVIEW_CHARS: usize = 32;
@@ -197,7 +218,17 @@ fn date_shape_error(text: &str) -> Error {
 
 impl fmt::Display for Date {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Debug for Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Date")
+            .field("year", &self.year())
+            .field("month", &self.month())
+            .field("day", &self.day())
+            .finish()
     }
 }
 
@@ -209,35 +240,10 @@ impl FromStr for Date {
     }
 }
 
-impl Ord for Date {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.days_since_epoch().cmp(&other.days_since_epoch())
-    }
-}
-
-impl PartialOrd for Date {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Gregorian month length.
-fn days_in_month(year: u16, month: u8) -> u8 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn is_leap_year(year: u16) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
 
     fn assert_validation_error(text: &str) {
@@ -250,16 +256,82 @@ mod tests {
         );
     }
 
+    fn assert_new_validation_error(year: u16, month: u8, day: u8) {
+        assert!(
+            matches!(
+                Date::new(year, month, day),
+                Err(Error::Validation { field: "date", .. })
+            ),
+            "expected a date validation error for {year:04}-{month:02}-{day:02}"
+        );
+    }
+
     #[test]
-    fn unknown_months_have_no_length() {
-        // `Date::new` rejects these before the table is consulted; the arm keeps
-        // the function total.
-        assert_eq!(days_in_month(2026, 0), 0);
-        assert_eq!(days_in_month(2026, 13), 0);
-        assert_eq!(days_in_month(2026, 2), 28);
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2026, 4), 30);
-        assert_eq!(days_in_month(2026, 12), 31);
+    fn date_operations_are_backed_by_jiff_civil_date() {
+        let date = Date::new(2024, 2, 29).expect("leap day");
+        let civil = CivilDate::new(2024, 2, 29).expect("jiff leap day");
+        let later = Date::new(2024, 3, 1).expect("next day");
+
+        assert_eq!(date.0, civil);
+        assert_eq!(date.to_string(), civil.to_string());
+        assert_eq!(
+            date.days_since_epoch(),
+            civil.duration_since(UNIX_EPOCH).as_secs() / SECONDS_PER_DAY
+        );
+        assert_eq!(date.cmp(&later), date.0.cmp(&later.0));
+    }
+
+    #[test]
+    fn year_boundaries_are_inclusive() {
+        assert!(Date::new(1970, 1, 1).is_ok());
+        assert_new_validation_error(1969, 12, 31);
+
+        assert!(Date::new(9999, 12, 31).is_ok());
+        assert_new_validation_error(10_000, 1, 1);
+        assert_new_validation_error(u16::MAX, 1, 1);
+    }
+
+    #[test]
+    fn month_boundaries_are_inclusive() {
+        assert!(Date::new(2026, 1, 1).is_ok());
+        assert_new_validation_error(2026, 0, 1);
+
+        assert!(Date::new(2026, 12, 31).is_ok());
+        assert_new_validation_error(2026, 13, 1);
+        assert_new_validation_error(2026, u8::MAX, 1);
+    }
+
+    #[test]
+    fn day_boundaries_include_leap_years_and_month_lengths() {
+        for (year, month, last_day) in [
+            (2024, 2, 29),
+            (2023, 2, 28),
+            (2026, 4, 30),
+            (2026, 1, 31),
+            (2000, 2, 29),
+            (2100, 2, 28),
+        ] {
+            assert!(Date::new(year, month, last_day).is_ok());
+            assert_new_validation_error(year, month, last_day + 1);
+            assert_new_validation_error(year, month, 0);
+        }
+        assert_new_validation_error(2026, 1, u8::MAX);
+    }
+
+    #[test]
+    fn new_keeps_the_existing_validation_messages() {
+        assert_eq!(
+            Date::new(1969, 1, 1).expect_err("year").to_string(),
+            "invalid date: year must be between 1970 and 9999"
+        );
+        assert_eq!(
+            Date::new(2026, 13, 1).expect_err("month").to_string(),
+            "invalid date: month must be between 1 and 12"
+        );
+        assert_eq!(
+            Date::new(2023, 2, 29).expect_err("day").to_string(),
+            "invalid date: day must be between 1 and 28 for 2023-02"
+        );
     }
 
     #[test]
@@ -285,16 +357,6 @@ mod tests {
         assert_eq!(min.cmp(&max), Ordering::Less);
         assert!(max.is_after(&min));
         assert!(!min.is_after(&max));
-    }
-
-    #[test]
-    fn dates_outside_the_supported_domain_are_rejected() {
-        for (year, month, day) in [(1969, 12, 31), (10_000, 1, 1)] {
-            assert!(matches!(
-                Date::new(year, month, day),
-                Err(Error::Validation { field: "date", .. })
-            ));
-        }
     }
 
     #[test]
