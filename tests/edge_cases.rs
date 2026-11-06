@@ -1567,7 +1567,7 @@ fn forged_separator_variants_are_revalidated_by_letter() {
 
 #[test]
 fn bank_form_fields_respect_the_documented_limits() {
-    use letterxpress::{BankForm, MAX_IBAN_CHARS, MAX_PAYEE_CHARS};
+    use letterxpress::{BankForm, MAX_BANK_AMOUNT_CHARS, MAX_IBAN_CHARS, MAX_PAYEE_CHARS};
 
     assert!(BankForm::generated(
         "A".repeat(MAX_PAYEE_CHARS + 1),
@@ -1616,6 +1616,42 @@ fn bank_form_fields_respect_the_documented_limits() {
     );
     assert!(BankForm::generated("", "DE12500105170648489890", "INGDDEFFXXX", "1", "R").is_err());
     assert!(BankForm::generated("A", "DE-1250", "INGDDEFFXXX", "1", "R").is_err());
+
+    for invalid in [
+        ",81",
+        ".81",
+        "81,",
+        "81.",
+        "8,1,0",
+        "1000000000",
+        "1000000000.00",
+    ] {
+        assert!(
+            BankForm::generated("A", "DE12500105170648489890", "INGDDEFFXXX", invalid, "R")
+                .is_err(),
+            "{invalid:?} must be rejected"
+        );
+    }
+    assert_eq!(
+        "999999999.99".chars().count(),
+        MAX_BANK_AMOUNT_CHARS,
+        "the amount range must use the full provider field width"
+    );
+
+    let trimmed = BankForm::generated(
+        " A ",
+        " DE12500105170648489890 ",
+        " INGDDEFFXXX ",
+        " 999999999.99 ",
+        " Rechnung ",
+    )
+    .expect("trimmed boundary values are valid");
+    let json = trimmed.to_json();
+    assert_eq!(json["payee"], "A");
+    assert_eq!(json["iban"], "DE12500105170648489890");
+    assert_eq!(json["bic"], "INGDDEFFXXX");
+    assert_eq!(json["amount"], "999999999.99");
+    assert_eq!(json["purpose_of_payment"], "Rechnung");
 }
 
 #[test]

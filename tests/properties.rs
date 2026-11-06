@@ -12,8 +12,9 @@ use std::time::Duration;
 use common::{client_with, pdf};
 use letterxpress::transport::{Method, RecordedRequest, Response};
 use letterxpress::{
-    AmbiguousKind, Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode, Money,
-    PrintMode, Registered, Shipping, TransportKind, MAX_NOTICE_CHARS, MAX_RETRY_AFTER,
+    AmbiguousKind, BankForm, Color, Credentials, Date, EmailOption, Error, JobStatus, Letter, Mode,
+    Money, PrintMode, Registered, Shipping, TransportKind, MAX_BANK_AMOUNT_CHARS, MAX_NOTICE_CHARS,
+    MAX_RETRY_AFTER,
 };
 use proptest::prelude::*;
 
@@ -239,6 +240,42 @@ proptest! {
         let expected = Money::parse(&ungrouped);
         prop_assert_eq!(Money::parse(&us), expected, "US: {}", us);
         prop_assert_eq!(Money::parse(&german), expected, "German: {}", german);
+    }
+
+    /// Every amount representable in the twelve-character bank-form field is
+    /// accepted, and the serialised value uses the shared canonical form.
+    #[test]
+    fn bank_amounts_cover_the_provider_range(cents in 0i64..=99_999_999_999) {
+        let amount = Money::from_cents(cents).expect("nonnegative").to_string();
+        prop_assert!(amount.chars().count() <= MAX_BANK_AMOUNT_CHARS);
+        let form = BankForm::generated(
+            "A",
+            "DE12500105170648489890",
+            "INGDDEFFXXX",
+            amount.clone(),
+            "R",
+        )
+        .expect("amount is in range");
+        let json = form.to_json();
+        prop_assert_eq!(json["amount"].as_str(), Some(amount.as_str()));
+    }
+
+    /// Arbitrary bank-amount text is rejected or produces a bounded, parseable
+    /// value after the same normalization used for every other field.
+    #[test]
+    fn bank_amount_text_is_bounded_and_parseable(raw in "\\PC{0,40}") {
+        if let Ok(form) = BankForm::generated(
+            "A",
+            "DE12500105170648489890",
+            "INGDDEFFXXX",
+            raw,
+            "R",
+        ) {
+            let amount = form.to_json()["amount"].as_str().unwrap().to_owned();
+            prop_assert!(amount.chars().count() <= MAX_BANK_AMOUNT_CHARS);
+            let parsed = Money::parse(&amount).expect("accepted bank amount parses");
+            prop_assert!(parsed.cents() <= 99_999_999_999);
+        }
     }
 
     /// Parsing a status and re-parsing its wire form is idempotent — including
