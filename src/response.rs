@@ -430,7 +430,15 @@ pub(crate) fn decode_base64(field: &'static str, encoded: &str) -> Result<Vec<u8
     use base64::Engine as _;
 
     let trimmed = encoded.trim();
-    let max_encoded = crate::MAX_PDF_BYTES.div_ceil(3) * 4 + 4;
+    let Some(max_encoded) = base64::encoded_len(crate::MAX_PDF_BYTES, true) else {
+        // The documented ceiling is far inside `usize`; fail closed if that
+        // ever stops being representable rather than dropping the guard.
+        return Err(Error::TooLarge {
+            field,
+            len: trimmed.len(),
+            max: 0,
+        });
+    };
     if trimmed.len() > max_encoded {
         return Err(Error::TooLarge {
             field,
@@ -596,11 +604,27 @@ mod tests {
     }
 
     #[test]
-    fn oversized_base64_is_refused_before_decoding() {
-        let encoded = "A".repeat(crate::MAX_PDF_BYTES.div_ceil(3) * 4 + 8);
+    fn the_base64_ceiling_uses_the_maintained_encoded_length() {
+        let max_encoded = base64::encoded_len(crate::MAX_PDF_BYTES, true)
+            .expect("the documented ceiling fits in usize");
+
+        {
+            // Exactly at the encoded ceiling: a valid padded payload.
+            let mut at_ceiling = "A".repeat(max_encoded - 1);
+            at_ceiling.push('=');
+            let decoded = decode_base64("invoice.base64_data", &at_ceiling)
+                .expect("the encoded ceiling is accepted");
+            assert_eq!(decoded.len(), crate::MAX_PDF_BYTES);
+        }
+
+        // One padded quartet past it. This is valid base64 that the hand-rolled
+        // `+ 4` accepted before decoding; the maintained helper rejects it
+        // before allocating, and reports the encoded boundary.
+        let encoded = "A".repeat(max_encoded + 4);
         assert!(matches!(
             decode_base64("invoice.base64_data", &encoded),
-            Err(Error::TooLarge { .. })
+            Err(Error::TooLarge { len, max, .. })
+                if len == max_encoded + 4 && max == max_encoded
         ));
     }
 
