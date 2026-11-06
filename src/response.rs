@@ -200,7 +200,14 @@ pub fn parse_envelope(endpoint: &'static str, response: Response) -> Result<Enve
 
     // The HTTP status decides first: it is the only signal that is always
     // present (the documented 401 body carries no `status` field).
-    if let Some(error) = http_error(endpoint, http_status, message.as_deref(), &response) {
+    let body_fallback = || body_snippet(&response);
+    if let Some(error) = http_error(
+        endpoint,
+        http_status,
+        message.as_deref(),
+        &response,
+        body_fallback,
+    ) {
         return Err(error);
     }
     // A body-level 4xx/5xx code is honoured when the HTTP status said 2xx.
@@ -244,9 +251,12 @@ fn http_error(
     status: u16,
     message: Option<&str>,
     response: &Response,
+    body_fallback: impl FnOnce() -> String,
 ) -> Option<Error> {
-    let fallback = || body_snippet(response);
-    let text = message.map_or_else(fallback, str::to_owned);
+    if (200..300).contains(&status) {
+        return None;
+    }
+    let text = message.map_or_else(body_fallback, str::to_owned);
     match status {
         401 => Some(Error::Unauthorized {
             message: if text.is_empty() {
@@ -389,14 +399,21 @@ fn status_of(value: &Value) -> Option<u16> {
     }
 }
 
+const BODY_SNIPPET_CHARS: usize = 512;
+const BODY_SNIPPET_PREFIX_BYTES: usize = BODY_SNIPPET_CHARS * 4;
+
 /// The first 512 characters of the raw body, for error messages when there is
 /// no envelope. Never more: a 50 MB HTML error page must not end up in a log
-/// line.
+/// line. Only a prefix large enough to hold 512 four-byte UTF-8 characters is
+/// copied before the cap is applied.
 fn body_snippet(response: &Response) -> String {
-    let text = String::from_utf8_lossy(response.body());
+    let body = response.body();
+    let prefix = &body[..body.len().min(BODY_SNIPPET_PREFIX_BYTES)];
+    let text = String::from_utf8_lossy(prefix);
     let trimmed = text.trim();
-    let mut snippet: String = trimmed.chars().take(512).collect();
-    if trimmed.chars().count() > 512 {
+    let mut chars = trimmed.chars();
+    let mut snippet: String = chars.by_ref().take(BODY_SNIPPET_CHARS).collect();
+    if chars.next().is_some() || body.len() > prefix.len() {
         snippet.push('…');
     }
     snippet
@@ -467,6 +484,10 @@ mod tests {
         parse_envelope("GET /v3/balance", Response::json_response(200, body))
     }
 
+    fn snippet_for(body: impl Into<Vec<u8>>) -> String {
+        body_snippet(&Response::new(500, std::iter::empty(), body.into()))
+    }
+
     #[test]
     fn envelope_accessors_expose_the_documented_parts() {
         let envelope =
@@ -511,6 +532,68 @@ mod tests {
             Err(Error::Unauthorized { message }) => assert_eq!(message, "Unauthorized."),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn successful_statuses_do_not_evaluate_the_body_fallback() {
+        for status in [200, 299] {
+            let calls = std::cell::Cell::new(0);
+            let response = Response::new(status, std::iter::empty(), b"{}".to_vec());
+            let error = http_error("GET /v3/balance", status, None, &response, || {
+                calls.set(calls.get() + 1);
+                "unused".to_string()
+            });
+            assert!(error.is_none(), "{status}");
+            assert_eq!(calls.get(), 0, "{status} must not build a snippet");
+        }
+
+        for status in [199, 300] {
+            let calls = std::cell::Cell::new(0);
+            let response = Response::new(status, std::iter::empty(), b"ignored".to_vec());
+            let error = http_error("GET /v3/balance", status, None, &response, || {
+                calls.set(calls.get() + 1);
+                "fallback".to_string()
+            })
+            .expect("a non-success status is an error");
+            assert_eq!(calls.get(), 1, "{status} must use the fallback");
+            assert!(error.to_string().contains("fallback"), "{status}: {error}");
+        }
+    }
+
+    #[test]
+    fn body_snippet_stops_at_the_character_boundary() {
+        let just_inside = "a".repeat(BODY_SNIPPET_CHARS - 1);
+        assert_eq!(snippet_for(just_inside.clone()), just_inside);
+
+        let at_limit = "a".repeat(BODY_SNIPPET_CHARS);
+        assert_eq!(snippet_for(at_limit.clone()), at_limit);
+
+        let over_limit = "a".repeat(BODY_SNIPPET_CHARS + 1);
+        assert_eq!(
+            snippet_for(over_limit),
+            format!("{}…", "a".repeat(BODY_SNIPPET_CHARS))
+        );
+    }
+
+    #[test]
+    fn body_snippet_holds_512_four_byte_characters() {
+        let at_limit = "😀".repeat(BODY_SNIPPET_CHARS);
+        assert_eq!(at_limit.len(), BODY_SNIPPET_PREFIX_BYTES);
+        assert_eq!(snippet_for(at_limit.clone()), at_limit);
+
+        let over_limit = format!("{at_limit}😀");
+        assert_eq!(snippet_for(over_limit), format!("{at_limit}…"));
+    }
+
+    #[test]
+    fn body_snippet_does_not_read_past_the_prefix_boundary() {
+        let mut just_inside = vec![b' '; BODY_SNIPPET_PREFIX_BYTES - 1];
+        just_inside.push(b'x');
+        assert_eq!(snippet_for(just_inside), "x");
+
+        let mut just_outside = vec![b' '; BODY_SNIPPET_PREFIX_BYTES];
+        just_outside.push(b'x');
+        assert_eq!(snippet_for(just_outside), "…");
     }
 
     #[test]
